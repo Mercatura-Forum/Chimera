@@ -1,7 +1,7 @@
-/// TreasuryMath.test.mo — S3.2 treasury arithmetic against its Python twin.
+/// TreasuryMath.test.mo - S3.2 treasury arithmetic against its Python twin.
 ///
 /// Every figure in `TreasuryVectors.mo` was computed by `integration/treasury_twin.py` (via
-/// `tools/gen_treasury_vectors.py`); this test recomputes each with `TreasuryMath.mo` and demands equality — the
+/// `tools/gen_treasury_vectors.py`); this test recomputes each with `TreasuryMath.mo` and demands equality - the
 /// rationals to the last unit of the reduced numerator and denominator, the rounded amounts exactly, the fixed-point
 /// figures bit for bit. What is proved: curve interpolation and simple-compounded discounting; the mark, realised
 /// result and quote amount of forwards; money-market interest under six day counts; bond coupon schedules, accrued

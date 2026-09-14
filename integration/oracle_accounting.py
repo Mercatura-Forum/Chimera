@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""oracle_accounting.py — external correctness oracle (hledger and Beancount).
+"""oracle_accounting.py - external correctness oracle (hledger and Beancount).
 
 Two independent checks. First, the S0X harness (integration/oracle/s0x_oracle.py,
-vendored unmodified) is run on its own fixture — the posting set the battery
-also pushed through the canister — and its three-way-agreed balances are
+vendored unmodified) is run on its own fixture - the posting set the battery
+also pushed through the canister - and its three-way-agreed balances are
 compared with the journal's trial balance. Second, the whole population the
 battery booked is rendered for hledger and Beancount by this module (the S0X
 fixture format is single-currency and has no value dates) and compared row by
 row per period, cumulatively, and by value date.
 
-Takes the evidence file written by battery.py — every posting the journal
+Takes the evidence file written by battery.py - every posting the journal
 booked, decoded from the raw committed bytes, plus the journal's own trial
-balances — renders the same postings as an hledger journal and as a Beancount
+balances - renders the same postings as an hledger journal and as a Beancount
 ledger, asks each tool for per-period and cumulative balances, and compares
 them with the journal's trial balance row by row. Value dates are rendered as
 hledger secondary dates and compared with the journal's value-dated balances.

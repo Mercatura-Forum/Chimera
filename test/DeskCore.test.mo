@@ -33,11 +33,11 @@ func check(cond : Bool, what : Text) { if (not cond) { failures += 1; Debug.prin
 
 // ─── the actor's shape, in a test ───
 let installer = Principal.fromText("2vxsx-fae");
-let me = Principal.fromText("rrkah-fqaaa-aaaaa-aaaaq-cai");
+let me = Principal.fromText("uudaw-bjl2s-u3g5n-tl3bw-myvsv-sc6dh-rhpoc-xn22a-bujen-j4k3w-3qe");
 let officer = Principal.fromText("2chl6-4hpzw-vqaaa-aaaaa-c");
-let checker = Principal.fromText("bkyz2-fmaaa-aaaaa-qaaaq-cai");
-let trader = Principal.fromText("be2us-64aaa-aaaaa-qaabq-cai");
-let stranger = Principal.fromText("br5f7-7uaaa-aaaaa-qaaca-cai");
+let checker = Principal.fromText("navaa-7dphy-ddxgp-nm5hc-zhuwg-42hef-qqids-odhp3-u34n3-bgqvc-uqe");
+let trader = Principal.fromText("jyy23-65gu4-qxgeu-qs74r-uoabv-2aegn-y7nxr-36d2o-arada-qcdpm-rqe");
+let stranger = Principal.fromText("xjwyi-4uhzb-pbxss-475s7-6gaae-qcefo-kkiw4-daxq2-fst74-yl5k3-vqe");
 let anonymous = Principal.fromText("2vxsx-fae");
 
 let desk = Core.newState(installer);

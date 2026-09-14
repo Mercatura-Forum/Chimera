@@ -2,8 +2,8 @@
 """Generate test/TreasuryVectors.mo: the Python twin's figures for the treasury arithmetic.
 
 `integration/treasury_twin.py` follows `src/bank/TreasuryMath.mo` step for step; this tool runs it over a
-deterministic set of inputs — curves, forwards, money-market deposits, bonds under four day counts, swaps,
-options across moneyness and tenor — and writes the results as Motoko constants, so `test/TreasuryMath.test.mo`
+deterministic set of inputs - curves, forwards, money-market deposits, bonds under four day counts, swaps,
+options across moneyness and tenor - and writes the results as Motoko constants, so `test/TreasuryMath.test.mo`
 proves the contract's arithmetic equals the twin's without a replica. The set is seeded, not hand-picked; the
 figures are what the twin computed, not what anyone expected.
 

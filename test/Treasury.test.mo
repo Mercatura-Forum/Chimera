@@ -1,12 +1,12 @@
-/// Treasury.test.mo — S3.2 treasury: the planners, the legs they build, the fold and the nostro reconciliation.
+/// Treasury.test.mo - S3.2 treasury: the planners, the legs they build, the fold and the nostro reconciliation.
 ///
-/// What is proved here (no journal, no canister — the pure layer):
+/// What is proved here (no journal, no canister - the pure layer):
 ///   1. configuration: the policy, a security whose maturity is off the coupon grid refused, curves (a duplicate
 ///      identical publication is nothing, a different one refused), limits, a nostro;
-///   2. deals: each kind captured and its row's facts; the refusals — a cross pair, a rate that is not spot plus
+///   2. deals: each kind captured and its row's facts; the refusals - a cross pair, a rate that is not spot plus
 ///      points, an interest deal in a Sharia book, a sale beyond the position, a swap with legs the same way;
 ///   3. limits over the fold: a counterparty exposure breached without an approver refused, with one recorded;
-///   4. money: the legs of every settlement balance per currency and land on the accounts the policy names —
+///   4. money: the legs of every settlement balance per currency and land on the accounts the policy names  - 
 ///      a placement's start and maturity with the accrual caught up, a forward at spot with the realised difference,
 ///      a bond bought dirty, accrued and amortised daily, its coupon paid, its sale consuming the lot pro rata to what
 ///      is booked, an option's premium and expiry, a swap period settled against a fixing;
@@ -172,7 +172,7 @@ let over = capture("TREASURY", #moneyMarket(big), ?approver);
 switch (Core.row(s, over)) { case (?r) { if ((r.flags & Core.F_WITHIN) != 0) fail("recorded within limits") }; case null fail("over row") };
 Debug.print("count: limit breaches refused then recorded with an approver = 2");
 
-// 4. money — the placement's start and maturity
+// 4. money - the placement's start and maturity
 func settle(id : Nat, leg : Nat, day : Nat) : Core.Act {
   let ?r = Core.row(s, id) else { fail("row " # Nat.toText(id)); loop {} };
   let ?k = terms(r.termsBlock) else { fail("terms"); loop {} };
@@ -358,7 +358,7 @@ let stt = Core.status(s);
 if (stt.deals != 8 or stt.breaksTotal != 2 or stt.breaksOpen != 1 or stt.statements != 2 or stt.securities != 1 or stt.nostros != 1) fail("status " # debug_show (stt));
 let f1 = fp(s);
 let s2 = Core.newState(RI.newArena());
-// replay: the same events in the same order rebuild the same fingerprint — the log is a list of (block, event) the test did not keep, so
+// replay: the same events in the same order rebuild the same fingerprint - the log is a list of (block, event) the test did not keep, so
 // the check here is the weaker one that the fingerprint is stable under a read
 if (not Blob.equal(f1, fp(s))) fail("fingerprint unstable");
 if (Blob.equal(f1, fp(s2))) fail("empty state has a different fingerprint");

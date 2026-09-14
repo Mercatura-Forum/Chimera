@@ -1,4 +1,4 @@
-"""treasury_twin.py — the Python twin of src/bank/TreasuryMath.mo (S3.2).
+"""treasury_twin.py - the Python twin of src/bank/TreasuryMath.mo (S3.2).
 
 Every function here follows the Motoko function of the same name step for step: exact rationals
 (`fractions.Fraction`) rounded half-even once, and 18-decimal fixed point with truncation toward zero for
