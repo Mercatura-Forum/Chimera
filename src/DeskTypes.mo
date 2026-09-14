@@ -27,6 +27,7 @@ import CallT "CallTypes";
 import CuT "CustodyTypes";
 import ST "SettlementTypes";
 import FT "FinancingTypes";
+import VT "ValuationTypes";
 
 module {
 
@@ -127,6 +128,12 @@ module {
     #settleLoanLeg : { loan : FT.LoanId; leg : Nat; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
     #recallLoan : { loan : FT.LoanId };
     #instructFinancing : { family : ST.Family; id : Nat; leg : Nat; counterparty : Principal; tradeId : ?Nat; reference : Text };
+    // ── valuation: bonds quoted by yield, hedge relationships ──
+    #setValuationPolicy : VT.Policy;
+    #quoteBondYield : { isin : Text; day : Day; yieldBps : Nat; source : Blob };
+    #designateHedge : { hedging : TT.DealId; hedged : TT.DealId; kind : VT.HedgeKind };
+    #assessHedge : { hedge : VT.HedgeId; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    #dedesignateHedge : { hedge : VT.HedgeId; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
     // ── treasury: the thirteen commands of Manticore's treasury domain, their bodies Manticore's ──
     #setTreasuryPolicy : TT.Policy;
     #registerSecurity : { terms : TT.SecurityTerms };
@@ -195,6 +202,7 @@ module {
     #custody : CuT.Event;
     #settlement : ST.Event;
     #financing : FT.Event;
+    #valuation : VT.Event;
   };
 
   public type BatchError = {
@@ -267,6 +275,7 @@ module {
     #CustodyError : { error : CuT.Error };
     #SettlementError : { error : ST.Error };
     #FinancingError : { error : FT.Error };
+    #ValuationError : { error : VT.Error };
     #MissingRate : { currency : Text; asOf : Day };
   };
 
@@ -363,6 +372,7 @@ module {
       case (#custody(_)) "custody";
       case (#settlement(_)) "settlement";
       case (#financing(_)) "financing";
+      case (#valuation(_)) "valuation";
     }
   };
 }

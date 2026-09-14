@@ -38,6 +38,8 @@ import CallT "CallTypes";
 import CuT "CustodyTypes";
 import ST "SettlementTypes";
 import FT "FinancingTypes";
+import VT "ValuationTypes";
+import TT "mo:manticore/TreasuryTypes";
 
 import T "DeskTypes";
 
@@ -276,6 +278,32 @@ module {
     let ?start = r.nat() else return null; let ?noticeDays = r.nat() else return null; let ?cashAccount = rCash(r) else return null; let ?depot = r.text() else return null;
     ?{ isin; nominal; currency; valueMicro; feeBps; dayCount; collateral; start; noticeDays; cashAccount; depot }
   };
+  // ─── valuation ───
+  func wHedgeKind(w : JC.Writer, k : VT.HedgeKind) { switch (k) { case (#cashFlow(c)) { w.byte(1); w.nat(c.hedgedAmount) }; case (#fairValue) w.byte(2) } };
+  func rHedgeKind(r : JC.Reader) : ?VT.HedgeKind { switch (r.byte()) { case (?1) { let ?hedgedAmount = r.nat() else return null; ?#cashFlow({ hedgedAmount }) }; case (?2) ?#fairValue; case (_) null } };
+  func wOptIrs(w : JC.Writer, i : ?TT.Irs) { switch (i) { case null w.byte(0); case (?x) { w.byte(1); TyCan.writeKind(w, #irs(x)) } } };
+  func rOptIrs(r : JC.Reader) : ??TT.Irs { switch (r.byte()) { case (?0) ?null; case (?1) { switch (TyCan.readKind(r)) { case (?#irs(x)) ??x; case (_) null } }; case (_) null } };
+  func wValuationEvent(w : JC.Writer, e : VT.Event) {
+    switch (e) {
+      case (#policySet(p)) { w.byte(0x01); w.text(p.hedgeReserve) };
+      case (#yieldQuoted(x)) { w.byte(0x02); w.text(x.isin); w.nat(x.day); w.nat(x.yieldBps); w.nat(x.priceMicro) };
+      case (#thetaRecorded(x)) { w.byte(0x03); w.nat(x.deal); w.nat(x.day); wInt(w, x.theta) };
+      case (#hedgeDesignated(x)) { w.byte(0x04); w.nat(x.hedging); w.nat(x.hedged); wHedgeKind(w, x.kind); wOptIrs(w, x.hypothetical); wInt(w, x.hedgingMark); wInt(w, x.hedgedValue); w.nat(x.day) };
+      case (#hedgeAssessed(x)) { w.byte(0x05); w.nat(x.hedge); wInt(w, x.hedgingChange); wInt(w, x.hedgedChange); w.nat(x.effectivenessBps); wInt(w, x.effective); wInt(w, x.ineffective); w.nat(x.day) };
+      case (#hedgeDedesignated(x)) { w.byte(0x06); w.nat(x.hedge); wInt(w, x.reclassified); w.nat(x.day) };
+    }
+  };
+  func rValuationEvent(r : JC.Reader) : ?VT.Event {
+    switch (r.byte()) {
+      case (?0x01) { let ?hedgeReserve = r.text() else return null; ?#policySet({ hedgeReserve }) };
+      case (?0x02) { let ?isin = r.text() else return null; let ?day = r.nat() else return null; let ?yieldBps = r.nat() else return null; let ?priceMicro = r.nat() else return null; ?#yieldQuoted({ isin; day; yieldBps; priceMicro }) };
+      case (?0x03) { let ?deal = r.nat() else return null; let ?day = r.nat() else return null; let ?theta = rInt(r) else return null; ?#thetaRecorded({ deal; day; theta }) };
+      case (?0x04) { let ?hedging = r.nat() else return null; let ?hedged = r.nat() else return null; let ?kind = rHedgeKind(r) else return null; let ?hypothetical = rOptIrs(r) else return null; let ?hedgingMark = rInt(r) else return null; let ?hedgedValue = rInt(r) else return null; let ?day = r.nat() else return null; ?#hedgeDesignated({ hedging; hedged; kind; hypothetical; hedgingMark; hedgedValue; day }) };
+      case (?0x05) { let ?hedge = r.nat() else return null; let ?hedgingChange = rInt(r) else return null; let ?hedgedChange = rInt(r) else return null; let ?effectivenessBps = r.nat() else return null; let ?effective = rInt(r) else return null; let ?ineffective = rInt(r) else return null; let ?day = r.nat() else return null; ?#hedgeAssessed({ hedge; hedgingChange; hedgedChange; effectivenessBps; effective; ineffective; day }) };
+      case (?0x06) { let ?hedge = r.nat() else return null; let ?reclassified = rInt(r) else return null; let ?day = r.nat() else return null; ?#hedgeDedesignated({ hedge; reclassified; day }) };
+      case (_) null;
+    }
+  };
   func wPayer(w : JC.Writer, p : FT.MarginPayer) { w.byte(switch (p) { case (#desk) 1; case (#counterparty) 2 }) };
   func rPayer(r : JC.Reader) : ?FT.MarginPayer { switch (r.byte()) { case (?1) ?#desk; case (?2) ?#counterparty; case (_) null } };
   func wFinancingEvent(w : JC.Writer, e : FT.Event) {
@@ -459,6 +487,11 @@ module {
       case (#settleLoanLeg(x)) { w.byte(0x77); w.nat(x.loan); w.nat(x.leg); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
       case (#recallLoan(x)) { w.byte(0x78); w.nat(x.loan) };
       case (#instructFinancing(x)) { w.byte(0x79); wFamily(w, x.family); w.nat(x.id); w.nat(x.leg); w.principal(x.counterparty); w.optNat(x.tradeId); w.text(x.reference) };
+      case (#setValuationPolicy(p)) { w.byte(0x80); w.text(p.hedgeReserve) };
+      case (#quoteBondYield(x)) { w.byte(0x81); w.text(x.isin); w.nat(x.day); w.nat(x.yieldBps); w.blob(x.source) };
+      case (#designateHedge(x)) { w.byte(0x82); w.nat(x.hedging); w.nat(x.hedged); wHedgeKind(w, x.kind) };
+      case (#assessHedge(x)) { w.byte(0x83); w.nat(x.hedge); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#dedesignateHedge(x)) { w.byte(0x84); w.nat(x.hedge); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
       case (#setTreasuryPolicy(p)) { w.byte(0x20); TyCan.writePolicy(w, p) };
       case (#registerSecurity(x)) { w.byte(0x21); TyCan.writeSecurityTerms(w, x.terms) };
       case (#publishCurve(x)) { w.byte(0x22); TyCan.writeCurve(w, x.curve) };
@@ -549,6 +582,11 @@ module {
       case 0x76 { let ?book = r.text() else return null; let ?counterparty = TyCan.readCounterparty(r) else return null; let ?terms = rLoanTerms(r) else return null; let ?reference = r.text() else return null; ?#openLoan({ book; counterparty; terms; reference }) };
       case 0x77 { let ?loan = r.nat() else return null; let ?leg = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#settleLoanLeg({ loan; leg; postingDate; valueDate; period; narration }) };
       case 0x78 { let ?loan = r.nat() else return null; ?#recallLoan({ loan }) };
+      case 0x80 { let ?hedgeReserve = r.text() else return null; ?#setValuationPolicy({ hedgeReserve }) };
+      case 0x81 { let ?isin = r.text() else return null; let ?day = r.nat() else return null; let ?yieldBps = r.nat() else return null; let ?source = r.blob() else return null; ?#quoteBondYield({ isin; day; yieldBps; source }) };
+      case 0x82 { let ?hedging = r.nat() else return null; let ?hedged = r.nat() else return null; let ?kind = rHedgeKind(r) else return null; ?#designateHedge({ hedging; hedged; kind }) };
+      case 0x83 { let ?hedge = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#assessHedge({ hedge; postingDate; valueDate; period; narration }) };
+      case 0x84 { let ?hedge = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#dedesignateHedge({ hedge; postingDate; valueDate; period; narration }) };
       case 0x79 { let ?family = rFamily(r) else return null; let ?id = r.nat() else return null; let ?leg = r.nat() else return null; let ?counterparty = r.principal() else return null; let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; ?#instructFinancing({ family; id; leg; counterparty; tradeId; reference }) };
       case 0x20 { let ?p = TyCan.readPolicy(r) else return null; ?#setTreasuryPolicy(p) };
       case 0x21 { let ?terms = TyCan.readSecurityTerms(r) else return null; ?#registerSecurity({ terms }) };
@@ -747,6 +785,7 @@ module {
       case (#custody(ce)) { w.byte(0x61); wCustodyEvent(w, ce) };
       case (#settlement(se)) { w.byte(0x62); wSettlementEvent(w, se) };
       case (#financing(fe)) { w.byte(0x63); wFinancingEvent(w, fe) };
+      case (#valuation(ve)) { w.byte(0x64); wValuationEvent(w, ve) };
     }
   };
 
@@ -794,6 +833,7 @@ module {
       case 0x61 { let ?ce = rCustodyEvent(r) else return null; ?#custody(ce) };
       case 0x62 { let ?se = rSettlementEvent(r) else return null; ?#settlement(se) };
       case 0x63 { let ?fe = rFinancingEvent(r) else return null; ?#financing(fe) };
+      case 0x64 { let ?ve = rValuationEvent(r) else return null; ?#valuation(ve) };
       case _ null;
     };
     switch (out) {

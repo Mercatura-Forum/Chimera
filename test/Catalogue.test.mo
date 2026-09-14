@@ -20,7 +20,7 @@ Debug.print("count: catalogue checks = " # Nat.toText(report.checked));
 let summary = P.summarise(Cat.catalogue());
 check(summary.commands == Cat.commandNames().size(), "one command row per family");
 check(summary.methods == Cat.guardedMethods().size(), "one method row per guarded method");
-check(summary.moneyMoving == 20, "twenty money-moving rows: amend, cancel, settle, mark, resolve, revalue, the call rate, balance and settlement, the depot transfer, the corporate action processed, the settlement instructed, bought in, cancelled and split, the repo settled, re-priced and margined, the loan settled, the financing instructed");
+check(summary.moneyMoving == 22, "twenty-two money-moving rows: the hedge assessed and dedesignated, amend, cancel, settle, mark, resolve, revalue, the call rate, balance and settlement, the depot transfer, the corporate action processed, the settlement instructed, bought in, cancelled and split, the repo settled, re-priced and margined, the loan settled, the financing instructed");
 Debug.print("count: catalogue rows = " # Nat.toText(summary.rows));
 Debug.print("count: money-moving rows = " # Nat.toText(summary.moneyMoving));
 Debug.print("count: dual-by-default rows = " # Nat.toText(summary.dual));

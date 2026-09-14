@@ -8,6 +8,11 @@ import Freeze "mo:kernel/domain/Freeze";
 module {
   public func vectors() : [Freeze.Vector] {
     [
+      { family = "setValuationPolicy"; version = 1; hex = "91c319d2847c42ffd3e52e8268e4250f20500f339f7676c03637e7e97300995a" },
+      { family = "quoteBondYield"; version = 1; hex = "b5a51ef93dc4cb1b6176775db4bd4473d27c3f20b4bd8db9fb446a1f5c8e0a40" },
+      { family = "designateHedge"; version = 1; hex = "db767541f069a5312a4869985790ff5f26b5507d2e34a8bb29d55d1494340866" },
+      { family = "assessHedge"; version = 1; hex = "a77733b07fec9dc03d3b8061e35d9e11d88484c9fe9fe000e519ff37e6637251" },
+      { family = "dedesignateHedge"; version = 1; hex = "4efcf1b7770ba08dd72ef1e12fd2bfae554ee00ed197e1843845f7251ed510a3" },
       { family = "setFinancingPolicy"; version = 1; hex = "5537023f5def370b8e495cae6dd96bdd7192f728c268aa332028160315718e5a" },
       { family = "openRepo"; version = 1; hex = "3861c145d91c275fe90fb2bee96ef7d9a9fd59ceedc1c38d1482f281c25ea85e" },
       { family = "settleRepoLeg"; version = 1; hex = "c317cb8b5e98b97f4d39ef18aea9348714dc0f9c6fe37453d989d62a0e0c5844" },

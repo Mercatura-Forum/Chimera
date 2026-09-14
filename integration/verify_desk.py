@@ -242,6 +242,39 @@ class Reader(V.Reader):
         t.update({"start": self.nat(), "noticeDays": self.nat(), "cashAccount": self.cash(), "depot": self.text()})
         return t
 
+    def hedge_kind(self):
+        k = self.byte()
+        if k == 1:
+            return {"cashFlow": {"hedgedAmount": self.nat()}}
+        if k == 2:
+            return {"fairValue": None}
+        raise ValueError(f"unknown hedge kind {k}")
+
+    def opt_irs(self):
+        p = self.byte()
+        if p == 0:
+            return None
+        assert p == 1, "bad option byte"
+        k = self.t_kind()
+        assert "irs" in k, "the hypothetical derivative is a swap"
+        return k["irs"]
+
+    def valuation_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"policySet": {"hedgeReserve": self.text()}}
+        if t == 0x02:
+            return {"yieldQuoted": {"isin": self.text(), "day": self.nat(), "yieldBps": self.nat(), "priceMicro": self.nat()}}
+        if t == 0x03:
+            return {"thetaRecorded": {"deal": self.nat(), "day": self.nat(), "theta": self.int_()}}
+        if t == 0x04:
+            return {"hedgeDesignated": {"hedging": self.nat(), "hedged": self.nat(), "kind": self.hedge_kind(), "hypothetical": self.opt_irs(), "hedgingMark": self.int_(), "hedgedValue": self.int_(), "day": self.nat()}}
+        if t == 0x05:
+            return {"hedgeAssessed": {"hedge": self.nat(), "hedgingChange": self.int_(), "hedgedChange": self.int_(), "effectivenessBps": self.nat(), "effective": self.int_(), "ineffective": self.int_(), "day": self.nat()}}
+        if t == 0x06:
+            return {"hedgeDedesignated": {"hedge": self.nat(), "reclassified": self.int_(), "day": self.nat()}}
+        raise ValueError(f"unknown valuation event tag {t:#x}")
+
     def payer(self):
         return {1: "desk", 2: "counterparty"}[self.byte()]
 
@@ -430,6 +463,16 @@ class Reader(V.Reader):
             return {"recallLoan": {"loan": self.nat()}}
         if tag == 0x79:
             return {"instructFinancing": {"family": self.FAMILIES[self.byte()], "id": self.nat(), "leg": self.nat(), "counterparty": self.principal(), "tradeId": self.opt_nat(), "reference": self.text()}}
+        if tag == 0x80:
+            return {"setValuationPolicy": {"hedgeReserve": self.text()}}
+        if tag == 0x81:
+            return {"quoteBondYield": {"isin": self.text(), "day": self.nat(), "yieldBps": self.nat(), "source": self.blob()}}
+        if tag == 0x82:
+            return {"designateHedge": {"hedging": self.nat(), "hedged": self.nat(), "kind": self.hedge_kind()}}
+        if tag == 0x83:
+            return {"assessHedge": {"hedge": self.nat(), **self.dates()}}
+        if tag == 0x84:
+            return {"dedesignateHedge": {"hedge": self.nat(), **self.dates()}}
         raise ValueError(f"unknown command tag {tag:#x}")
 
     def proposed(self):
@@ -517,6 +560,8 @@ class Reader(V.Reader):
             return {"settlement": self.settlement_event()}
         if t == 0x63:
             return {"financing": self.financing_event()}
+        if t == 0x64:
+            return {"valuation": self.valuation_event()}
         raise ValueError(f"unknown desk event tag {t:#x}")
 
     # ── lifted without change from Manticore's verify_bank.py at 9c0c30e ──

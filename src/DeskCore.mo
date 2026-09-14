@@ -57,6 +57,10 @@ import SettlementCore "SettlementCore";
 import SettlementMessages "SettlementMessages";
 import FT "FinancingTypes";
 import FinancingCore "FinancingCore";
+import VT "ValuationTypes";
+import Valuation "Valuation";
+import HedgeCore "HedgeCore";
+import Attribution "Attribution";
 import DT "mo:tachyon/DvpTypes";
 import Sha256 "mo:sha2/Sha256";
 import Calendar "mo:journal/Calendar";
@@ -79,6 +83,8 @@ module {
     custody : CustodyCore.State;
     settlement : SettlementCore.State;
     financing : FinancingCore.State;
+    hedges : HedgeCore.State;
+    attribution : Attribution.State;
   };
 
   public func newState(installer : Principal) : State { newStateIn(installer, RI.newArena()) };
@@ -96,6 +102,8 @@ module {
       custody = CustodyCore.newState(arena);
       settlement = SettlementCore.newState(arena);
       financing = FinancingCore.newState(arena);
+      hedges = HedgeCore.newState(arena);
+      attribution = Attribution.newState(arena);
     }
   };
 
@@ -142,6 +150,8 @@ module {
       case (#resetRepoRate(x)) ?x.postingDate;
       case (#meetMarginCall(x)) ?x.postingDate;
       case (#settleLoanLeg(x)) ?x.postingDate;
+      case (#assessHedge(x)) ?x.postingDate;
+      case (#dedesignateHedge(x)) ?x.postingDate;
       case (_) null;
     }
   };
@@ -179,6 +189,9 @@ module {
       case (#settleLoanLeg(x)) bookOfLoan(s, x.loan);
       case (#recallLoan(x)) bookOfLoan(s, x.loan);
       case (#instructFinancing(x)) { switch (x.family) { case (#repo) bookOfRepo(s, x.id); case (#loan) bookOfLoan(s, x.id); case (#treasury) bookOfDeal(s, x.id) } };
+      case (#designateHedge(x)) bookOfDeal(s, x.hedging);
+      case (#assessHedge(x)) { switch (HedgeCore.hedge(s.hedges, x.hedge)) { case (?h) bookOfDeal(s, h.hedging); case null null } };
+      case (#dedesignateHedge(x)) { switch (HedgeCore.hedge(s.hedges, x.hedge)) { case (?h) bookOfDeal(s, h.hedging); case null null } };
       case (_) null;
     }
   };
@@ -189,6 +202,21 @@ module {
   func balanceOfCall(s : State, call : Nat) : [(Text, Nat)] { switch (CallCore.row(s.calls, call)) { case (?r) [(r.currency, r.balance)]; case null [] } };
   func bookOfDeal(s : State, deal : Nat) : ?T.BookId { switch (TreasuryCore.row(s.treasury, deal)) { case (?r) ?r.book; case null null } };
   func notionalOfDeal(s : State, deal : Nat) : [(Text, Nat)] { switch (TreasuryCore.row(s.treasury, deal)) { case (?r) [(treasuryRowCurrency(s, r), r.notional)]; case null [] } };
+  /// The currency a deal's result is in: the quote currency of a forward, a swap or an option, the instrument's
+  /// currency of a lot, the deal's own otherwise.
+  public func resultCurrency(s : State, bb : Blocks, deal : Nat) : Text {
+    switch (TreasuryCore.row(s.treasury, deal)) {
+      case (?r) {
+        switch (treasuryKindOf(bb, r)) {
+          case (?#fxForward(f)) f.quote;
+          case (?#fxSwap(x)) x.near.quote;
+          case (?#fxOption(o)) o.quote;
+          case (_) treasuryRowCurrency(s, r);
+        }
+      };
+      case null "";
+    }
+  };
   func treasuryRowCurrency(s : State, r : TreasuryCore.DealRow) : Text {
     if (r.kind == 4) { switch (TreasuryCore.security(s.treasury, r.isin)) { case (?x) x.currency; case null "" } } else r.currency
   };
@@ -227,6 +255,8 @@ module {
       case (#openLoan(x)) [(x.terms.currency, FinancingCore.loanValue({ id = 0; state = #open; book = ""; cpHash = 0; currency = x.terms.currency; isin = x.terms.isin; nominal = x.terms.nominal; valueMicro = x.terms.valueMicro; feeBps = 0; dayCount = 0; cashCollateral = 0; rebateBps = 0; collateralIsin = ""; collateralNominal = 0; start = 0; noticeDays = 0; returnDay = 0; accrualFrom = 0; feeBefore = 0; feePosted = 0; rebateBefore = 0; rebatePosted = 0; manufactured = 0; depot = ""; lastBlock = 0; refHash = 0 }))];
       case (#settleLoanLeg(x)) { switch (FinancingCore.loan(s.financing, x.loan)) { case (?r) [(r.currency, FinancingCore.loanValue(r))]; case null [] } };
       case (#instructFinancing(x)) { switch (x.family, FinancingCore.repo(s.financing, x.id), FinancingCore.loan(s.financing, x.id)) { case (#repo, ?r, _) [(r.currency, r.cash)]; case (#loan, _, ?l) [(l.currency, FinancingCore.loanValue(l))]; case (_) [] } };
+      case (#assessHedge(x)) { switch (HedgeCore.hedge(s.hedges, x.hedge)) { case (?h) notionalOfDeal(s, h.hedging); case null [] } };
+      case (#dedesignateHedge(x)) { switch (HedgeCore.hedge(s.hedges, x.hedge)) { case (?h) notionalOfDeal(s, h.hedging); case null [] } };
       case (_) [];
     }
   };
@@ -528,6 +558,39 @@ module {
       case (#treasury) financingErr(#InvalidTerms({ reason = "a treasury deal is instructed by its own act" }));
     }
   };
+  func valuationErr<X>(e : VT.Error) : Res<X> { #err(#ValuationError({ error = e })) };
+  /// The market data recorded for a day, for the desk's own valuation.
+  public func dataOn(s : State, day : Nat) : Valuation.Data {
+    Valuation.dataOn(s.treasury, day, func(ccy : Text, d : Nat) : ?Fx.Rate { CloseCore.rateOn(s.close, ccy, d) }, func(index : Text, d : Nat) : ?Nat { Fixings.fixingOn(s.fixings, index, d) })
+  };
+  /// The mark of a deal at a day from the data of another day: the day's own for the mark itself, the previous
+  /// day's for the theta.
+  public func markOf(s : State, bb : Blocks, deal : Nat, day : Nat, dataDay : Nat) : Res<?Int> {
+    let r = switch (treasuryRow(s, deal)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+    let kind = switch (treasuryKind(bb, r)) { case (#err(e)) return #err(e); case (#ok(k)) k };
+    switch (Valuation.markWith(s.treasury, r, kind, day, dataOn(s, dataDay))) {
+      case (#ok(v)) #ok(v);
+      case (#err(#NoCurve(x))) treasuryErr(#UnknownCurve({ curve = x.curve; day = dataDay }));
+      case (#err(#NoSpot(x))) treasuryErr(#NoRate({ currency = x.currency; day = dataDay }));
+      case (#err(#UnknownSecurity(x))) treasuryErr(#UnknownSecurity({ isin = x.isin }));
+      case (#err(#NotMarked)) #ok(null);
+    }
+  };
+  /// The hedged item's value for a hedge on a day: the hypothetical derivative's mark for a cash-flow hedge, the
+  /// lot's clean value at the day's price for a fair-value hedge.
+  func hedgedValueOf(s : State, bb : Blocks, h : HedgeCore.Row, hypothetical : ?TT.Irs, day : Nat) : Res<Int> {
+    if (h.cashFlow) {
+      let ?hyp = hypothetical else return valuationErr(#InvalidTerms({ reason = "a cash-flow hedge names its hypothetical derivative" }));
+      let r = switch (treasuryRow(s, h.hedging)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+      switch (Valuation.markWith(s.treasury, r, #irs(hyp), day, dataOn(s, day))) { case (#ok(?v)) #ok(v); case (#ok(null)) #ok(0); case (#err(_)) treasuryErr(#UnknownCurve({ curve = hyp.discountCurve; day })) }
+    } else {
+      let r = switch (treasuryRow(s, h.hedged)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+      let ?price = priceOf(s, r.isin, day) else return valuationErr(#NoPrice({ isin = r.isin; day }));
+      #ok(TreasuryMath.cleanCost(r.nominalLeft, price))
+    }
+  };
+  func hypotheticalOf(bb : Blocks, hedge : Nat) : ?TT.Irs { switch (bb.get(hedge)) { case (?b) { switch (b.event) { case (#valuation(#hedgeDesignated(x))) x.hypothetical; case (_) null } }; case null null } };
+  func lotAccountOf(p : TT.Policy, flags : Nat8) : Text { if ((flags & TreasuryCore.F_FVOCI) != 0) p.securitiesFvoci else if ((flags & TreasuryCore.F_FVTPL) != 0) p.securitiesFvtpl else p.securitiesAmortisedCost };
   func custodyErr<X>(e : CuT.Error) : Res<X> { #err(#CustodyError({ error = e })) };
   func custodyPlan(r : Result.Result<CuT.Event, CuT.Error>) : Res<Plan> { switch (r) { case (#err(e)) custodyErr(e); case (#ok(ev)) only(#custody(ev)) } };
   func isinOfLot(s : State) : TT.DealId -> Text { func(lot : Nat) : Text { switch (TreasuryCore.row(s.treasury, lot)) { case (?r) r.isin; case null "" } } };
@@ -1047,6 +1110,75 @@ module {
         let amounts = switch (financingLegAmounts(s, x.family, x.id, x.leg, today)) { case (#err(e)) return #err(e); case (#ok(v)) v };
         settlementPlan(SettlementCore.planInstructFinancing(s.settlement, x.family, x.id, x.leg, amounts.isin, amounts.currency, amounts.nominal, amounts.cash, amounts.deskDelivers, amounts.cycleDay, x.counterparty, x.tradeId, x.reference, today))
       };
+      // ── valuation ──
+      case (#setValuationPolicy(pol)) {
+        switch (JCore.getAccount(js, pol.hedgeReserve)) { case null return #err(#UnknownAccount({ role = "hedge reserve"; account = pol.hedgeReserve })); case (?_) {} };
+        switch (HedgeCore.planPolicy(pol)) { case (#err(e)) valuationErr(e); case (#ok(ev)) only(#valuation(ev)) }
+      };
+      case (#quoteBondYield(x)) {
+        let ?sec = TreasuryCore.security(s.treasury, x.isin) else return treasuryErr(#UnknownSecurity({ isin = x.isin }));
+        if (x.day < today) return valuationErr(#InvalidTerms({ reason = "a quote is for the day or ahead" }));
+        let ?price = Valuation.priceOfYield(sec, x.yieldBps, x.day) else return valuationErr(#InvalidTerms({ reason = "the yield prices the bond at nothing, or the bond has matured" }));
+        switch (TreasuryCore.planPublishCurve(s.treasury, { id = x.isin; kind = #securityPrice; currency = sec.currency; day = x.day; points = [(0, price)]; source = x.source })) {
+          case (#err(e)) treasuryErr(e);
+          case (#ok(null)) only(#valuation(#yieldQuoted({ isin = x.isin; day = x.day; yieldBps = x.yieldBps; priceMicro = price })));
+          case (#ok(?te)) #ok({ event = ?#valuation(#yieldQuoted({ isin = x.isin; day = x.day; yieldBps = x.yieldBps; priceMicro = price })); extra = [#treasury(te)]; journal = [] });
+        }
+      };
+      case (#designateHedge(x)) {
+        if (HedgeCore.policy(s.hedges) == null) return valuationErr(#NoPolicy);
+        let hr = switch (treasuryRow(s, x.hedging)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        if (not TreasuryCore.isOpen(hr)) return valuationErr(#NotMarkable({ deal = x.hedging; reason = "the hedging instrument is " # TT.dealStateText(hr.state) }));
+        let hk = switch (treasuryKind(bb, hr)) { case (#err(e)) return #err(e); case (#ok(k)) k };
+        switch (hk) { case (#irs(_) or #fxForward(_)) {}; case (_) return valuationErr(#NotMarkable({ deal = x.hedging; reason = "a hedging instrument is a swap or a forward" })) };
+        let hedgingMark = switch (markOf(s, bb, x.hedging, today, today)) { case (#err(e)) return #err(e); case (#ok(?v)) v; case (#ok(null)) return valuationErr(#NotMarkable({ deal = x.hedging; reason = "the hedging instrument carries no mark today" })) };
+        switch (x.kind) {
+          case (#cashFlow(c)) {
+            let #irs(i) = hk else return valuationErr(#InvalidTerms({ reason = "a cash-flow hedge is by a swap" }));
+            if (c.hedgedAmount == 0) return valuationErr(#InvalidTerms({ reason = "the hedged amount is positive" }));
+            switch (treasuryRow(s, x.hedged)) { case (#err(_)) { if (CallCore.row(s.calls, x.hedged) == null) return valuationErr(#NotMarkable({ deal = x.hedged; reason = "the hedged item is a deal or a call" })) }; case (#ok(_)) {} };
+            let hyp : TT.Irs = { i with notional = c.hedgedAmount };
+            let hedgedValue = switch (Valuation.markWith(s.treasury, hr, #irs(hyp), today, dataOn(s, today))) { case (#ok(?v)) v; case (#ok(null)) 0; case (#err(_)) return treasuryErr(#UnknownCurve({ curve = i.discountCurve; day = today })) };
+            only(#valuation(#hedgeDesignated({ hedging = x.hedging; hedged = x.hedged; kind = x.kind; hypothetical = ?hyp; hedgingMark; hedgedValue; day = today })))
+          };
+          case (#fairValue) {
+            let lot = switch (treasuryRow(s, x.hedged)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+            if (lot.kind != 4 or (lot.flags & TreasuryCore.F_BUY) == 0 or not TreasuryCore.isOpen(lot)) return valuationErr(#NotMarkable({ deal = x.hedged; reason = "a fair-value hedge is of a purchase lot" }));
+            let ?price = priceOf(s, lot.isin, today) else return valuationErr(#NoPrice({ isin = lot.isin; day = today }));
+            only(#valuation(#hedgeDesignated({ hedging = x.hedging; hedged = x.hedged; kind = x.kind; hypothetical = null; hedgingMark; hedgedValue = TreasuryMath.cleanCost(lot.nominalLeft, price); day = today })))
+          };
+        }
+      };
+      case (#assessHedge(x)) {
+        let ?vp = HedgeCore.policy(s.hedges) else return valuationErr(#NoPolicy);
+        let ?tp = TreasuryCore.policy(s.treasury) else return treasuryErr(#NoPolicy);
+        let ?h = HedgeCore.hedge(s.hedges, x.hedge) else return valuationErr(#UnknownHedge({ hedge = x.hedge }));
+        let hr = switch (treasuryRow(s, h.hedging)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        switch (requireNoOpenRun(s, hr.book, x.valueDate)) { case (?e) return #err(e); case null {} };
+        let hedgingMark = switch (markOf(s, bb, h.hedging, x.valueDate, x.valueDate)) { case (#err(e)) return #err(e); case (#ok(?v)) v; case (#ok(null)) 0 };
+        let hedgedValue = switch (hedgedValueOf(s, bb, h, hypotheticalOf(bb, x.hedge), x.valueDate)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        let ev = switch (HedgeCore.planAssess(s.hedges, x.hedge, hedgingMark, hedgedValue, x.valueDate)) { case (#err(e)) return valuationErr(e); case (#ok(e)) e };
+        let (currency, lotAccount) = if (h.cashFlow) (hr.currency, "") else { switch (treasuryRow(s, h.hedged)) { case (#err(e)) return #err(e); case (#ok(l)) (treasuryRowCurrency(s, l), lotAccountOf(tp, l.flags)) } };
+        let legs = HedgeCore.legsOf(vp, tp, h, currency, lotAccount, ev);
+        if (legs.size() == 0) return only(#valuation(ev));
+        switch (postLegs(js, journalCaller, now, "hedge-assessment", [authId, Nat.toText(x.hedge), Nat.toText(x.valueDate)], legs, x.postingDate, x.valueDate, x.period, x.narration)) {
+          case (#err(e)) #err(e);
+          case (#ok(plan)) #ok({ event = ?#valuation(ev); extra = []; journal = plan.journal });
+        }
+      };
+      case (#dedesignateHedge(x)) {
+        let ?vp = HedgeCore.policy(s.hedges) else return valuationErr(#NoPolicy);
+        let ?tp = TreasuryCore.policy(s.treasury) else return treasuryErr(#NoPolicy);
+        let ?h = HedgeCore.hedge(s.hedges, x.hedge) else return valuationErr(#UnknownHedge({ hedge = x.hedge }));
+        let hr = switch (treasuryRow(s, h.hedging)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        let ev = switch (HedgeCore.planDedesignate(s.hedges, x.hedge, x.valueDate)) { case (#err(e)) return valuationErr(e); case (#ok(e)) e };
+        let legs = HedgeCore.legsOf(vp, tp, h, hr.currency, "", ev);
+        if (legs.size() == 0) return only(#valuation(ev));
+        switch (postLegs(js, journalCaller, now, "hedge-dedesignation", [authId, Nat.toText(x.hedge)], legs, x.postingDate, x.valueDate, x.period, x.narration)) {
+          case (#err(e)) #err(e);
+          case (#ok(plan)) #ok({ event = ?#valuation(ev); extra = []; journal = plan.journal });
+        }
+      };
       case (#splitDeal(x)) {
         switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
         let r = switch (treasuryRow(s, x.deal)) { case (#err(e)) return #err(e); case (#ok(r)) r };
@@ -1425,7 +1557,14 @@ module {
         case null {};
       };
       switch (current()) {
-        case (?r) { switch (TreasuryCore.planMark(s.treasury, r, kind, day, ctx)) { case (#ok(?a)) ignore post("treasury-mark", r.id, "m", a, "valuation at day " # Nat.toText(day)); case (#ok(null)) {}; case (#err(e)) fail(acc, index, item.job, book, r.id, debug_show e) } };
+        case (?r) {
+          // the theta first, from the previous day's data at the day against the mark as it stands, then the mark
+          switch (Valuation.markWith(s.treasury, r, kind, day, dataOn(s, day - 1))) {
+            case (#ok(?withPrevious)) { let standing = if (r.kind == 4) r.fvPosted else r.markPosted; record(acc, #valuation(#thetaRecorded({ deal = r.id; day; theta = withPrevious - standing }))) };
+            case (_) {};
+          };
+          switch (TreasuryCore.planMark(s.treasury, r, kind, day, ctx)) { case (#ok(?a)) ignore post("treasury-mark", r.id, "m", a, "valuation at day " # Nat.toText(day)); case (#ok(null)) {}; case (#err(e)) fail(acc, index, item.job, book, r.id, debug_show e) };
+        };
         case null {};
       };
       var leg = 0;
@@ -1758,11 +1897,17 @@ module {
       case (#fixingRecorded(f)) Fixings.fold(s.fixings, f);
       case (#eod(e)) Eod.fold(s.eod, block.index, e);
       case (#alert(ae)) AlertCore.apply(s.alerts, block.index, ae);
-      case (#treasury(te)) { TreasuryCore.fold(s.treasury, block.index, te); CustodyCore.observeTreasury(s.custody, te, func(id : Nat) : ?TreasuryCore.DealRow { TreasuryCore.row(s.treasury, id) }) };
+      case (#treasury(te)) {
+        let before = switch (te) { case (#couponPaid(x)) TreasuryCore.row(s.treasury, x.deal); case (#legSettled(x)) TreasuryCore.row(s.treasury, x.deal); case (_) null };
+        TreasuryCore.fold(s.treasury, block.index, te);
+        CustodyCore.observeTreasury(s.custody, te, func(id : Nat) : ?TreasuryCore.DealRow { TreasuryCore.row(s.treasury, id) });
+        Attribution.observeTreasury(s.attribution, block.index, te, before);
+      };
       case (#call(ce)) CallCore.fold(s.calls, block.index, ce);
       case (#custody(ce)) CustodyCore.fold(s.custody, block.index, ce, isinOfLot(s));
       case (#settlement(se)) SettlementCore.fold(s.settlement, block.index, se);
       case (#financing(fe)) FinancingCore.fold(s.financing, block.index, fe);
+      case (#valuation(ve)) { HedgeCore.fold(s.hedges, block.index, ve); switch (ve) { case (#thetaRecorded(x)) Attribution.observeTheta(s.attribution, x.deal, x.day, x.theta); case (_) {} } };
       case (_) Auth.apply(s.authority, block);
     };
     if (block.index + 1 > s.height) s.height := block.index + 1;
@@ -1839,6 +1984,8 @@ module {
     CustodyCore.fingerprintInto(w, s.custody);
     SettlementCore.fingerprintInto(w, s.settlement);
     FinancingCore.fingerprintInto(w, s.financing);
+    HedgeCore.fingerprintInto(w, s.hedges);
+    Attribution.fingerprintInto(w, s.attribution);
   };
   public func fingerprint(s : State) : Blob { let w = JC.Writer(); fingerprintInto(w, s); KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob()) };
   /// The fingerprint by section, so a divergence between the live state and a fresh fold names the sub-state.
@@ -1855,6 +2002,8 @@ module {
       one("custody", func(w) { CustodyCore.fingerprintInto(w, s.custody) }),
       one("settlement", func(w) { SettlementCore.fingerprintInto(w, s.settlement) }),
       one("financing", func(w) { FinancingCore.fingerprintInto(w, s.financing) }),
+      one("hedges", func(w) { HedgeCore.fingerprintInto(w, s.hedges) }),
+      one("attribution", func(w) { Attribution.fingerprintInto(w, s.attribution) }),
     ]
   };
 

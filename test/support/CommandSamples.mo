@@ -16,6 +16,7 @@ import CallT "../../src/CallTypes";
 import CuT "../../src/CustodyTypes";
 import ST "../../src/SettlementTypes";
 import FT "../../src/FinancingTypes";
+import VT "../../src/ValuationTypes";
 
 import T "../../src/DeskTypes";
 import Can "../../src/DeskCanonical";
@@ -51,8 +52,15 @@ module {
   public let repoTerms : FT.RepoTerms = { reverse = false; currency = "EGP"; cash = 9_500_000_00; rateBps = 1900; dayCount = #a004_Act365Fixed; start = 20670; maturity = ?20700; collateral = { isin = "EG0000012345"; nominal = 10_000_000_00 }; haircutBps = 500; thresholdBps = 200; cashAccount = cash; depot = "DEPOT-CITI" };
   public let loanTerms : FT.LoanTerms = { isin = "EG0000012345"; nominal = 5_000_000_00; currency = "EGP"; valueMicro = 98_000_000; feeBps = 50; dayCount = #a004_Act365Fixed; collateral = #cash({ amount = 5_100_000_00; rebateBps = 1800 }); start = 20670; noticeDays = 3; cashAccount = cash; depot = "DEPOT-CITI" };
 
+  public let irs : TT.Irs = { currency = "EGP"; notional = 20_000_000_00; payFixed = true; fixedBps = 2050; floatingIndex = "CBE-ON"; spreadBps = 25; start = 20670; maturity = 20850; paymentMonths = 1; dayCount = #a003_Act360; cash; discountCurve = "EGP-ZERO" };
+
   public func samples() : [Freeze.Sample<T.Command>] {
     [
+      { family = "setValuationPolicy"; command = #setValuationPolicy({ hedgeReserve = "3600" }) },
+      { family = "quoteBondYield"; command = #quoteBondYield({ isin = "EG0000012345"; day = 20670; yieldBps = 1180; source = h(8) }) },
+      { family = "designateHedge"; command = #designateHedge({ hedging = 45; hedged = 40; kind = #cashFlow({ hedgedAmount = 8_000_000_00 }) }) },
+      { family = "assessHedge"; command = #assessHedge({ hedge = 95; postingDate = 20700; valueDate = 20700; period = "2026-08"; narration = "assessment" }) },
+      { family = "dedesignateHedge"; command = #dedesignateHedge({ hedge = 95; postingDate = 20710; valueDate = 20710; period = "2026-09"; narration = "dedesignation" }) },
       { family = "setFinancingPolicy"; command = #setFinancingPolicy(financingPolicy) },
       { family = "openRepo"; command = #openRepo({ book = "BR01"; counterparty = citi; terms = repoTerms; reference = "repo-1" }) },
       { family = "settleRepoLeg"; command = #settleRepoLeg({ repo = 80; leg = 0; postingDate = 20670; valueDate = 20670; period = "2026-08"; narration = "repo start" }) },
@@ -232,6 +240,13 @@ module {
       #financing(#loanRecalled({ loan = 81; day = 20686; returnDay = 20690 })),
       #financing(#loanReturned({ loan = 81; fee = 13_425; rebate = 503_013; day = 20690 })),
       #financing(#manufacturedPayment({ loan = 81; action = 70; lot = 40; amount = 30_000_00; day = 20688 })),
+      #valuation(#policySet({ hedgeReserve = "3600" })),
+      #valuation(#yieldQuoted({ isin = "EG0000012345"; day = 20670; yieldBps = 1180; priceMicro = 100_450_000 })),
+      #valuation(#thetaRecorded({ deal = 45; day = 20671; theta = -1_234 })),
+      #valuation(#hedgeDesignated({ hedging = 45; hedged = 40; kind = #cashFlow({ hedgedAmount = 8_000_000_00 }); hypothetical = ?{ irs with notional = 8_000_000_00 }; hedgingMark = 12_345; hedgedValue = 9_876; day = 20670 })),
+      #valuation(#hedgeDesignated({ hedging = 45; hedged = 40; kind = #fairValue; hypothetical = null; hedgingMark = 12_345; hedgedValue = 9_800_000_00; day = 20670 })),
+      #valuation(#hedgeAssessed({ hedge = 95; hedgingChange = 10_000; hedgedChange = -8_000; effectivenessBps = 8000; effective = 8_000; ineffective = 2_000; day = 20700 })),
+      #valuation(#hedgeDedesignated({ hedge = 95; reclassified = 8_000; day = 20710 })),
     ]
   };
 }

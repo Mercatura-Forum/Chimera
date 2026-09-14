@@ -67,6 +67,10 @@ import SettlementCore "SettlementCore";
 import SettlementMessages "SettlementMessages";
 import FT "FinancingTypes";
 import FinancingCore "FinancingCore";
+import VT "ValuationTypes";
+import Valuation "Valuation";
+import HedgeCore "HedgeCore";
+import Attribution "Attribution";
 import DT "mo:tachyon/DvpTypes";
 import ICRC "mo:tachyon/ICRC";
 import Map "mo:core/Map";
@@ -915,6 +919,30 @@ shared (initMsg) persistent actor class Desk(init : {
   };
   public query func loanLots(id : Nat) : async [(Nat, Nat)] { FinancingCore.lotsOfLoan(desk.financing, id) };
   public query func financingStatus() : async FT.Status { FinancingCore.status(desk.financing) };
+  // ─── valuation reads ───
+  public query func valuationPolicy() : async ?VT.Policy { HedgeCore.policy(desk.hedges) };
+  public query func hedge(id : Nat) : async ?VT.HedgeView { switch (HedgeCore.hedge(desk.hedges, id)) { case (?h) ?HedgeCore.view(h); case null null } };
+  public query func hedges() : async [VT.HedgeView] { Array.map<HedgeCore.Row, VT.HedgeView>(HedgeCore.hedges(desk.hedges), HedgeCore.view) };
+  /// A deal's result attributed by period: new, carry, market move and the whole.
+  public shared query ({ caller }) func attribution(deal : Nat) : async Result.Result<[VT.AttributionView], T.Error> {
+    switch (TreasuryCore.row(desk.treasury, deal)) { case (?r) { if (not Auth.mayReadBook(readScope(caller), r.book)) return #err(#OutsideBookScope({ book = r.book })) }; case null {} };
+    #ok(Attribution.rowsOfDeal(desk.attribution, deal, Core.resultCurrency(desk, deskBlocks(), deal)))
+  };
+  public shared query ({ caller }) func attributionOfBook(book : T.BookId, period : Text) : async Result.Result<[VT.AttributionView], T.Error> {
+    if (not Auth.mayReadBook(readScope(caller), book)) return #err(#OutsideBookScope({ book }));
+    let out = List.empty<VT.AttributionView>();
+    for (r in TreasuryCore.dealsOfBook(desk.treasury, book).vals()) { switch (Attribution.row(desk.attribution, r.id, period)) { case (?row) List.add(out, Attribution.view(r.id, period, Core.resultCurrency(desk, deskBlocks(), r.id), row)); case null {} } };
+    #ok(List.toArray(out))
+  };
+  /// The desk's own mark of a deal at a day from that day's data, or from another day's (the theta's reading).
+  public shared query ({ caller }) func markOf(deal : Nat, day : Nat, dataDay : Nat) : async Result.Result<?Int, T.Error> {
+    switch (TreasuryCore.row(desk.treasury, deal)) { case (?r) { if (not Auth.mayReadBook(readScope(caller), r.book)) return #err(#OutsideBookScope({ book = r.book })) }; case null {} };
+    Core.markOf(desk, deskBlocks(), deal, day, dataDay)
+  };
+  /// A bond's clean price per 100 in micro at a yield in basis points, and the yield of a price.
+  public query func bondPriceOfYield(isin : Text, yieldBps : Nat, day : Nat) : async ?Nat { switch (TreasuryCore.security(desk.treasury, isin)) { case (?sec) Valuation.priceOfYield(sec, yieldBps, day); case null null } };
+  public query func bondYieldOfPrice(isin : Text, priceMicro : Nat, day : Nat) : async ?Nat { switch (TreasuryCore.security(desk.treasury, isin)) { case (?sec) Valuation.yieldOfPrice(sec, priceMicro, day); case null null } };
+  public query func valuationStatus() : async VT.Status { { hedges = desk.hedges.count; openHedges = desk.hedges.open; quotes = desk.hedges.quotes; thetas = desk.hedges.thetas; attributionRows = desk.attribution.rowCount } };
   /// A depot's position in an instrument with what is pledged or lent and what is held for a counterparty.
   public query func depotAvailable(depotId : Text, isin : Text) : async CuT.AvailableView { CustodyCore.availableView(desk.custody, depotId, isin) };
   public query func settlementConfirmation(id : Nat) : async ?Text { instructionMessage(id, true) };

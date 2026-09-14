@@ -105,6 +105,12 @@ module {
       p("loan.settle", "loan", #update, #command("settleLoanLeg"), true, true),
       p("loan.recall", "loan", #update, #command("recallLoan"), false, true),
       p("settlement.instruct.financing", "settlement", #create, #command("instructFinancing"), true, true),
+      // ── valuation ──
+      p("valuation.policy", "valuation", #update, #command("setValuationPolicy"), false, true),
+      p("market.yield.quote", "market", #create, #command("quoteBondYield"), false, true),
+      p("hedge.designate", "hedge", #create, #command("designateHedge"), false, true),
+      p("hedge.assess", "hedge", #update, #command("assessHedge"), true, true),
+      p("hedge.dedesignate", "hedge", #update, #command("dedesignateHedge"), true, true),
       // ── treasury (Manticore's rows, verbatim) ──
       p("treasury.policy", "treasury", #update, #command("setTreasuryPolicy"), false, true),
       p("treasury.security.register", "treasury", #create, #command("registerSecurity"), false, true),
@@ -186,6 +192,11 @@ module {
       case (#settleLoanLeg(_)) "settleLoanLeg";
       case (#recallLoan(_)) "recallLoan";
       case (#instructFinancing(_)) "instructFinancing";
+      case (#setValuationPolicy(_)) "setValuationPolicy";
+      case (#quoteBondYield(_)) "quoteBondYield";
+      case (#designateHedge(_)) "designateHedge";
+      case (#assessHedge(_)) "assessHedge";
+      case (#dedesignateHedge(_)) "dedesignateHedge";
       case (#setTreasuryPolicy(_)) "setTreasuryPolicy";
       case (#registerSecurity(_)) "registerSecurity";
       case (#publishCurve(_)) "publishCurve";
@@ -214,6 +225,7 @@ module {
       "setCustodyPolicy", "extendInstrument", "openDepot", "setBookDepot", "assignDealDepot", "transferDepot", "announceCorporateAction", "cancelCorporateAction", "processCorporateAction",
       "setSettlementVenue", "setSettlementLedger", "openSettlementCycle", "instructSettlement", "setInstructionTrade", "recycleSettlement", "recordSettlementStatus", "buyIn", "cancelSettlement", "splitDeal",
       "setFinancingPolicy", "openRepo", "settleRepoLeg", "resetRepoRate", "meetMarginCall", "substituteCollateral", "openLoan", "settleLoanLeg", "recallLoan", "instructFinancing",
+      "setValuationPolicy", "quoteBondYield", "designateHedge", "assessHedge", "dedesignateHedge",
       "setTreasuryPolicy", "registerSecurity", "publishCurve", "setTreasuryLimit", "registerNostro", "captureDeal", "confirmDeal", "amendDeal", "cancelDeal",
       "settleDealLeg", "markDeal", "recordNostroStatement", "resolveNostroBreak",
     ]
