@@ -8,6 +8,20 @@ import Freeze "mo:kernel/domain/Freeze";
 module {
   public func vectors() : [Freeze.Vector] {
     [
+      { family = "setCollateralPolicy"; version = 1; hex = "e0ccc2a895e5d1773a648109bd48ca3086849059bbd842450fbad15859f0fc79" },
+      { family = "setCollateralAgreement"; version = 1; hex = "1105280b198dad83e912c1c7443ad946ed7bb3f7ed940c7dcdac93d4dc9ca638" },
+      { family = "postCollateralCash"; version = 1; hex = "ca168416d8bd9c0b3662193eb5808f5fb2eb6acdb8cb80bb387fd1ccc31b6613" },
+      { family = "pledgeCollateral"; version = 1; hex = "761d6c9383b7764598967d14aed35751c1e8fb1787707732314f2d459e2d01e8" },
+      { family = "releaseCollateral"; version = 1; hex = "657db30db7bcfe6168410ba54ef13c777b93c38ae6e145a5e9ea6f9d6ba9a847" },
+      { family = "receiveCollateral"; version = 1; hex = "49a9e6348d7c7fd8f98b2783a20d52eecd16cb7a706669995ca2946320e49734" },
+      { family = "returnCollateral"; version = 1; hex = "1f10c4177b9de530fa310c1f0465be86b0f10a1ffdb1010da75ba82ffa487017" },
+      { family = "openCollateralSubstitution"; version = 1; hex = "face8e59faaee88d337bb5e4670f53667dde506ae01bbbb24b95c8c77fbdabca" },
+      { family = "settleCollateralSubstitution"; version = 1; hex = "77dd6110bdf8de9e1fc453abd896197a6091140f3184ff1516aef429aff7f16a" },
+      { family = "settleCollateralInterest"; version = 1; hex = "9a370968f9810239a0c3e215c2ef4d6c7197e4bd3a4ca9498645bab44a6839e3" },
+      { family = "setLimitNode"; version = 1; hex = "90fec977eb2d7c60814d03245c7960adf8a5e44e331c5a36cbb1f8d31c50c962" },
+      { family = "removeLimitNode"; version = 1; hex = "35448ae227b7b922297473fdb9e4fea10870e91fe89a57bc5d5f70bb96e21171" },
+      { family = "amendCounterparty"; version = 1; hex = "092b597c985c7c04a27aa5da9421bd74cd43511501f4c7d5a50886aff8210cf8" },
+      { family = "openRiskSweep"; version = 1; hex = "ac90c71073a90736e4fab82799f4a7d5b32297be87152a3b458adf2baa721120" },
       { family = "setValuationPolicy"; version = 1; hex = "91c319d2847c42ffd3e52e8268e4250f20500f339f7676c03637e7e97300995a" },
       { family = "quoteBondYield"; version = 1; hex = "b5a51ef93dc4cb1b6176775db4bd4473d27c3f20b4bd8db9fb446a1f5c8e0a40" },
       { family = "designateHedge"; version = 1; hex = "db767541f069a5312a4869985790ff5f26b5507d2e34a8bb29d55d1494340866" },

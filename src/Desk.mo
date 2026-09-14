@@ -71,6 +71,11 @@ import VT "ValuationTypes";
 import Valuation "Valuation";
 import HedgeCore "HedgeCore";
 import Attribution "Attribution";
+import CoT "CollateralTypes";
+import CollateralCore "CollateralCore";
+import LT "LimitTypes";
+import LimitCore "LimitCore";
+import IC "mo:core/InternetComputer";
 import DT "mo:tachyon/DvpTypes";
 import ICRC "mo:tachyon/ICRC";
 import Map "mo:core/Map";
@@ -155,6 +160,10 @@ shared (initMsg) persistent actor class Desk(init : {
     if (r.record) recordRefusal(caller, permission, r.error);
     #err(r.error)
   };
+  /// A command refused by the limit tree leaves one block per breached node: the desk proves what it prevented.
+  func recordTrail(caller : Principal, command : T.Command, e : T.Error) {
+    for (ev in Core.refusalTrail(desk, journal, now(), caller, command, e).vals()) ignore commitDesk(caller, ev, null);
+  };
   /// Every write method names its permission from the catalogue; the identifier is a required argument.
   func requireMethodPermission(caller : Principal, method : Text) : Result.Result<T.PermissionId, T.Error> {
     let ?perm = Cat.byMethod(method) else Runtime.trap("Desk: method " # method # " has no catalogue entry");
@@ -228,7 +237,7 @@ shared (initMsg) persistent actor class Desk(init : {
   public shared ({ caller }) func propose(command : T.Command, justification : Text) : async Result.Result<ProposeResult, T.Error> {
     switch (requireMethodPermission(caller, "propose")) { case (#err(e)) return #err(e); case (#ok(_)) {} };
     switch (Core.prepareProposal(desk, deskBlocks(), journal, me(), caller, now(), command, justification)) {
-      case (#err(r)) fail<ProposeResult>(caller, Auth.commandPermission(command), r);
+      case (#err(r)) { recordTrail(caller, command, r.error); fail<ProposeResult>(caller, Auth.commandPermission(command), r) };
       case (#ok(out)) {
         let b = commitDesk(caller, out.event, ?out.trailer);
         switch (b.event) {
@@ -248,6 +257,7 @@ shared (initMsg) persistent actor class Desk(init : {
     switch (Core.prepareApprove(desk, deskBlocks(), journal, me(), caller, now(), proposal)) {
       case (#err(r)) {
         let perm = switch (Auth.getProposal(desk.authority, deskBlocks(), proposal)) { case (?v) v.permission; case null "command.approve" };
+        switch (Auth.bodyOf(deskBlocks(), proposal)) { case (?command) recordTrail(caller, command, r.error); case null {} };
         fail<ApproveResult>(caller, perm, r)
       };
       case (#ok(out)) {
@@ -287,7 +297,7 @@ shared (initMsg) persistent actor class Desk(init : {
   public shared ({ caller }) func perform(command : T.Command) : async Result.Result<PerformResult, T.Error> {
     switch (requireMethodPermission(caller, "perform")) { case (#err(e)) return #err(e); case (#ok(_)) {} };
     switch (Core.preparePerform(desk, deskBlocks(), journal, me(), caller, now(), command)) {
-      case (#err(r)) fail<PerformResult>(caller, Auth.commandPermission(command), r);
+      case (#err(r)) { recordTrail(caller, command, r.error); fail<PerformResult>(caller, Auth.commandPermission(command), r) };
       case (#ok(_)) {
         let at = desk.height;
         let postings = executeCommand(caller, Nat.toText(at), command);
@@ -302,7 +312,7 @@ shared (initMsg) persistent actor class Desk(init : {
   public shared ({ caller }) func emergencyOverride(command : T.Command, witness : Principal, justification : Text) : async Result.Result<OverrideResult, T.Error> {
     switch (requireMethodPermission(caller, "emergencyOverride")) { case (#err(e)) return #err(e); case (#ok(_)) {} };
     switch (Core.prepareOverride(desk, deskBlocks(), journal, me(), caller, now(), command, witness, justification)) {
-      case (#err(r)) fail<OverrideResult>(caller, "command.breakGlass", r);
+      case (#err(r)) { recordTrail(caller, command, r.error); fail<OverrideResult>(caller, "command.breakGlass", r) };
       case (#ok(out)) {
         let b = commitDesk(caller, out.event, ?out.trailer);
         let postings = executeCommand(caller, Nat.toText(b.index), command);
@@ -338,6 +348,17 @@ shared (initMsg) persistent actor class Desk(init : {
         let v = Eod.view(run);
         #ok({ book; businessDate; cursor = v.cursor; items = v.items; posted = v.posted; examined = v.examined; zeroMovement = v.zeroMovement; failures = v.failures.size(); completed = a.completed; blocks = a.blocks; postings = a.postings })
       };
+    }
+  };
+  public type SweepResult = { day : Nat; family : Text; visited : Nat; familyDone : Bool; published : Bool; blocks : [Nat]; postings : [Nat]; instructions : Nat64 };
+  /// Anyone may advance an open risk sweep: the day, the bound and the slice size were fixed when it opened under
+  /// dual control, the rows walked are the next in order, and the caller chooses nothing. The instructions the
+  /// slice took are returned, so a battery records the meter beside the figures.
+  public shared func advanceRiskSweep() : async Result.Result<SweepResult, T.Error> {
+    let recorder : Core.Recorder = { desk = func(ev : T.Event) : Nat { commitDesk(me(), ev, null).index }; journal = func(ev : JT.Event) : Nat { commitJournal(ev).index } };
+    switch (Core.runRiskSweepSlice(desk, deskBlocks(), journal, journalBlocks(), me(), now(), recorder)) {
+      case (#err(e)) #err(e);
+      case (#ok(a)) #ok({ day = a.day; family = a.family; visited = a.visited; familyDone = a.familyDone; published = a.published; blocks = a.blocks; postings = a.postings; instructions = IC.performanceCounter(0) });
     }
   };
   public query func endOfDayRun(book : T.BookId, businessDate : Nat) : async ?T.RunView { switch (Eod.getRun(desk.eod, book, businessDate)) { case (?r) ?Eod.view(r); case null null } };
@@ -461,6 +482,29 @@ shared (initMsg) persistent actor class Desk(init : {
       sections = Array.tabulate<(Text, Blob, Blob)>(live.size(), func(i) { (live[i].0, live[i].1, replayed[i].1) }) }
   };
 
+  /// One section of the replay's comparison, for a state too large to digest whole in one message: the live and
+  /// the replayed fingerprints of the named section.
+  public query func replaySectionNames() : async [Text] { Core.sectionNames() };
+  public query func replaySection(name : Text) : async ?{ complete : Bool; current : Bool; live : Blob; replayed : Blob; instructions : Nat64 } {
+    let ?r = replay else return null;
+    let ?live = Core.fingerprintSection(desk, name) else return null;
+    let ?replayed = Core.fingerprintSection(r.state, name) else return null;
+    ?{ complete = r.complete; current = r.complete and r.deskTarget == desk.height and r.journalTarget == JLog.length(journalLog); live; replayed; instructions = IC.performanceCounter(0) }
+  };
+  /// The comparison in bounded messages for a state too large to digest a section at a time: the row indexes by
+  /// name, one page of one index hashed on both sides, and the scalar figures of every core.
+  public query func replayDigestIndexes() : async [Text] { Array.map<(Text, RI.State), Text>(Core.digestIndexes(desk), func((n, _)) { n }) };
+  public query func replayDigest(index : Nat, cursor : ?Blob, limit : Nat) : async ?{ complete : Bool; current : Bool; live : Blob; replayed : Blob; entries : Nat; next : ?Blob; instructions : Nat64 } {
+    let ?r = replay else return null;
+    let lives = Core.digestIndexes(desk); let replays = Core.digestIndexes(r.state);
+    if (index >= lives.size()) return null;
+    let a = Core.digestPage(lives[index].1, cursor, limit); let b = Core.digestPage(replays[index].1, cursor, limit);
+    ?{ complete = r.complete; current = r.complete and r.deskTarget == desk.height and r.journalTarget == JLog.length(journalLog); live = a.hash; replayed = b.hash; entries = a.entries; next = a.next; instructions = IC.performanceCounter(0) }
+  };
+  public query func replayScalars() : async ?{ complete : Bool; current : Bool; live : [(Text, Text)]; replayed : [(Text, Text)] } {
+    let ?r = replay else return null;
+    ?{ complete = r.complete; current = r.complete and r.deskTarget == desk.height and r.journalTarget == JLog.length(journalLog); live = Core.digestScalars(desk); replayed = Core.digestScalars(r.state) }
+  };
   /// The fingerprint by section, live and replayed in one message, naming the sub-state that diverges when one
   /// does; a log longer than one message folds is compared through the replay in steps instead.
   public query func fingerprintSections() : async [(Text, Blob, Blob)] {
@@ -859,11 +903,12 @@ shared (initMsg) persistent actor class Desk(init : {
     }
   };
 
+  func substitutionReference(id : Nat) : Text { switch (CollateralCore.securitiesRow(desk.collateral, id)) { case (?r) "collateral/" # r.agreement # "/" # Nat.toText(id); case null "" } };
   public query func settlementVenue() : async ?ST.Venue { SettlementCore.venue(desk.settlement) };
   public query func settlementLedgers() : async [ST.LedgerDeclaration] { SettlementCore.ledgers(desk.settlement) };
   public query func settlementCycle(businessDate : Nat) : async ?ST.CycleView { switch (SettlementCore.cycle(desk.settlement, businessDate)) { case (?c) ?SettlementCore.cycleView(c); case null null } };
   func instructionView(r : SettlementCore.InstructionRow) : ST.InstructionView {
-    let reference = switch (r.family) { case (#treasury) Core.treasuryCaptureOf(deskBlocks(), r.deal).1; case (#repo) Core.repoOpeningOf(deskBlocks(), r.deal).1; case (#loan) Core.loanOpeningOf(deskBlocks(), r.deal).1 };
+    let reference = switch (r.family) { case (#treasury) Core.treasuryCaptureOf(deskBlocks(), r.deal).1; case (#repo) Core.repoOpeningOf(deskBlocks(), r.deal).1; case (#loan) Core.loanOpeningOf(deskBlocks(), r.deal).1; case (#collateral) substitutionReference(r.deal) };
     SettlementCore.view(r, reference)
   };
   public query func settlementInstruction(id : Nat) : async ?ST.InstructionView { switch (SettlementCore.instruction(desk.settlement, id)) { case (?r) ?instructionView(r); case null null } };
@@ -879,6 +924,7 @@ shared (initMsg) persistent actor class Desk(init : {
       case (#treasury) { let ?r = TreasuryCore.row(desk.treasury, i.deal) else return null; (r.isin, Core.treasuryCaptureOf(deskBlocks(), i.deal).1, r.start, Core.safekeepingAccountOf(desk, i.deal)) };
       case (#repo) { let ?r = FinancingCore.repo(desk.financing, i.deal) else return null; (r.isin, Core.repoOpeningOf(deskBlocks(), i.deal).1, i.cycle, switch (CustodyCore.depot(desk.custody, r.depot)) { case (?d) d.safekeepingAccount; case null r.depot }) };
       case (#loan) { let ?l = FinancingCore.loan(desk.financing, i.deal) else return null; (l.isin, Core.loanOpeningOf(deskBlocks(), i.deal).1, i.cycle, switch (CustodyCore.depot(desk.custody, l.depot)) { case (?d) d.safekeepingAccount; case null l.depot }) };
+      case (#collateral) { let ?r = CollateralCore.securitiesRow(desk.collateral, i.deal) else return null; (r.isin, substitutionReference(i.deal), r.day, switch (CustodyCore.depot(desk.custody, r.depot)) { case (?d) d.safekeepingAccount; case null r.depot }) };
     };
     let ?sec = TreasuryCore.security(desk.treasury, isin) else return null;
     let receive = i.role == #taker;
@@ -946,6 +992,44 @@ shared (initMsg) persistent actor class Desk(init : {
   /// A depot's position in an instrument with what is pledged or lent and what is held for a counterparty.
   public query func depotAvailable(depotId : Text, isin : Text) : async CuT.AvailableView { CustodyCore.availableView(desk.custody, depotId, isin) };
   public query func settlementConfirmation(id : Nat) : async ?Text { instructionMessage(id, true) };
+
+  // ─── collateral ───
+  public query func collateralAgreement(id : Text) : async ?CoT.AgreementView {
+    switch (CollateralCore.agreement(desk.collateral, id)) {
+      case (?a) { var acc : Int = 0; for (c in CollateralCore.cashOf(desk.collateral, id).vals()) acc += c.interestAccrued; ?CollateralCore.agreementView(a, acc) };
+      case null null;
+    }
+  };
+  public query func collateralAgreements() : async [CoT.AgreementView] {
+    Array.map<CollateralCore.AgreementRow, CoT.AgreementView>(CollateralCore.agreements(desk.collateral), func(a) { var acc : Int = 0; for (c in CollateralCore.cashOf(desk.collateral, a.id).vals()) acc += c.interestAccrued; CollateralCore.agreementView(a, acc) })
+  };
+  public query func collateralCash(agreement : Text) : async [CoT.CashView] { Array.map<CollateralCore.CashRow, CoT.CashView>(CollateralCore.cashOf(desk.collateral, agreement), CollateralCore.cashView) };
+  public query func collateralSecurities(agreement : Text) : async [CoT.SecuritiesView] { Array.map<CollateralCore.SecuritiesRow, CoT.SecuritiesView>(CollateralCore.securitiesOf(desk.collateral, agreement), CollateralCore.securitiesView) };
+  public query func collateralCalls(agreement : Text) : async [CoT.CallView] { Array.map<CollateralCore.CallRow, CoT.CallView>(CollateralCore.callsOf(desk.collateral, agreement), CollateralCore.callView) };
+  public query func collateralCall(id : Nat) : async ?CoT.CallView { switch (CollateralCore.call(desk.collateral, id)) { case (?c) ?CollateralCore.callView(c); case null null } };
+  public query func collateralStatus() : async CoT.Status { CollateralCore.status(desk.collateral) };
+  /// The haircut an agreement applies to an instrument on a day: the schedule's, or the supervisory table's.
+  public query func collateralHaircut(agreement : Text, isin : Text, day : Nat) : async ?Nat {
+    let ?a = CollateralCore.agreement(desk.collateral, agreement) else return null;
+    let ?sec = TreasuryCore.security(desk.treasury, isin) else return null;
+    let ?inst = CustodyCore.instrument(desk.custody, isin) else return null;
+    CollateralCore.haircutBps(desk.collateral, a, inst.classification, if (sec.maturity > day) sec.maturity - day else 0)
+  };
+
+  // ─── limits ───
+  public query func limitNode(id : Text) : async ?LT.NodeView { switch (LimitCore.node(desk.limits, id)) { case (?n) ?LimitCore.view(n); case null null } };
+  public query func limitTree() : async [LT.NodeView] { Array.map<LimitCore.NodeRow, LT.NodeView>(LimitCore.nodes(desk.limits), LimitCore.view) };
+  public query func limitCounters(node : Text, from : Nat, to : Nat) : async [LT.CounterView] { LimitCore.countersOf(desk.limits, node, from, to) };
+  public query func limitCounterparty(name : Text) : async ?LT.Counterparty { switch (LimitCore.counterparty(desk.limits, name)) { case (?c) ?{ name = c.name; group = c.group; country = c.country }; case null null } };
+  public query func limitCounterparties() : async [LT.Counterparty] { Array.map<LimitCore.CounterpartyRow, LT.Counterparty>(LimitCore.counterparties(desk.limits), func(c) { { name = c.name; group = c.group; country = c.country } }) };
+  public query func riskSweep() : async ?LT.SweepView { LimitCore.sweepView(desk.limits) };
+  public query func limitStatus() : async LT.Status { LimitCore.status(desk.limits) };
+  /// The instructions a command's planning takes, for the meter beside the tree's check: the plan is computed and
+  /// discarded, nothing is recorded.
+  public shared query ({ caller }) func planMeter(command : T.Command) : async { ok : Bool; instructions : Nat64 } {
+    let ok = switch (Core.planCommand(desk, deskBlocks(), journal, me(), now(), caller, Nat.toText(desk.height), command)) { case (#ok(_)) true; case (#err(_)) false };
+    { ok; instructions = IC.performanceCounter(0) }
+  };
 
   // ═══════════════════════════════════════════════════════
   //  LIFECYCLE

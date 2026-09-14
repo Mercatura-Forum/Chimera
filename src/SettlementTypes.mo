@@ -27,8 +27,8 @@ module {
 
   /// What an instruction settles: a treasury deal's delivery leg, a repo's start (0) or close (1) leg, a loan's
   /// start (0) or return (1) leg.
-  public type Family = { #treasury; #repo; #loan };
-  public func familyText(f : Family) : Text { switch (f) { case (#treasury) "treasury"; case (#repo) "repo"; case (#loan) "loan" } };
+  public type Family = { #treasury; #repo; #loan; #collateral };
+  public func familyText(f : Family) : Text { switch (f) { case (#treasury) "treasury"; case (#repo) "repo"; case (#loan) "loan"; case (#collateral) "collateral" } };
   public type Role = { #maker; #taker };
   public func roleText(r : Role) : Text { switch (r) { case (#maker) "maker"; case (#taker) "taker" } };
 

@@ -111,6 +111,22 @@ module {
       p("hedge.designate", "hedge", #create, #command("designateHedge"), false, true),
       p("hedge.assess", "hedge", #update, #command("assessHedge"), true, true),
       p("hedge.dedesignate", "hedge", #update, #command("dedesignateHedge"), true, true),
+      // ── collateral: the agreements are governance; every movement of the pool moves money or a depot ──
+      p("collateral.policy", "collateral", #update, #command("setCollateralPolicy"), false, true),
+      p("collateral.agreement.update", "collateral", #update, #command("setCollateralAgreement"), false, true),
+      p("collateral.cash.post", "collateral", #update, #command("postCollateralCash"), true, true),
+      p("collateral.pledge", "collateral", #update, #command("pledgeCollateral"), true, true),
+      p("collateral.release", "collateral", #update, #command("releaseCollateral"), true, true),
+      p("collateral.receive", "collateral", #update, #command("receiveCollateral"), true, true),
+      p("collateral.return", "collateral", #update, #command("returnCollateral"), true, true),
+      p("collateral.substitution.open", "collateral", #create, #command("openCollateralSubstitution"), true, true),
+      p("collateral.substitution.settle", "collateral", #update, #command("settleCollateralSubstitution"), true, true),
+      p("collateral.interest.settle", "collateral", #update, #command("settleCollateralInterest"), true, true),
+      // ── limits: the tree and the counterparty data are governance; the sweep is opened under dual control ──
+      p("limit.node.update", "limit", #update, #command("setLimitNode"), false, true),
+      p("limit.node.remove", "limit", #delete, #command("removeLimitNode"), false, true),
+      p("counterparty.amend", "counterparty", #update, #command("amendCounterparty"), false, true),
+      p("risk.sweep.open", "risk", #create, #command("openRiskSweep"), false, true),
       // ── treasury (Manticore's rows, verbatim) ──
       p("treasury.policy", "treasury", #update, #command("setTreasuryPolicy"), false, true),
       p("treasury.security.register", "treasury", #create, #command("registerSecurity"), false, true),
@@ -197,6 +213,20 @@ module {
       case (#designateHedge(_)) "designateHedge";
       case (#assessHedge(_)) "assessHedge";
       case (#dedesignateHedge(_)) "dedesignateHedge";
+      case (#setCollateralPolicy(_)) "setCollateralPolicy";
+      case (#setCollateralAgreement(_)) "setCollateralAgreement";
+      case (#postCollateralCash(_)) "postCollateralCash";
+      case (#pledgeCollateral(_)) "pledgeCollateral";
+      case (#releaseCollateral(_)) "releaseCollateral";
+      case (#receiveCollateral(_)) "receiveCollateral";
+      case (#returnCollateral(_)) "returnCollateral";
+      case (#openCollateralSubstitution(_)) "openCollateralSubstitution";
+      case (#settleCollateralSubstitution(_)) "settleCollateralSubstitution";
+      case (#settleCollateralInterest(_)) "settleCollateralInterest";
+      case (#setLimitNode(_)) "setLimitNode";
+      case (#removeLimitNode(_)) "removeLimitNode";
+      case (#amendCounterparty(_)) "amendCounterparty";
+      case (#openRiskSweep(_)) "openRiskSweep";
       case (#setTreasuryPolicy(_)) "setTreasuryPolicy";
       case (#registerSecurity(_)) "registerSecurity";
       case (#publishCurve(_)) "publishCurve";
@@ -226,6 +256,9 @@ module {
       "setSettlementVenue", "setSettlementLedger", "openSettlementCycle", "instructSettlement", "setInstructionTrade", "recycleSettlement", "recordSettlementStatus", "buyIn", "cancelSettlement", "splitDeal",
       "setFinancingPolicy", "openRepo", "settleRepoLeg", "resetRepoRate", "meetMarginCall", "substituteCollateral", "openLoan", "settleLoanLeg", "recallLoan", "instructFinancing",
       "setValuationPolicy", "quoteBondYield", "designateHedge", "assessHedge", "dedesignateHedge",
+      "setCollateralPolicy", "setCollateralAgreement", "postCollateralCash", "pledgeCollateral", "releaseCollateral", "receiveCollateral", "returnCollateral",
+      "openCollateralSubstitution", "settleCollateralSubstitution", "settleCollateralInterest",
+      "setLimitNode", "removeLimitNode", "amendCounterparty", "openRiskSweep",
       "setTreasuryPolicy", "registerSecurity", "publishCurve", "setTreasuryLimit", "registerNostro", "captureDeal", "confirmDeal", "amendDeal", "cancelDeal",
       "settleDealLeg", "markDeal", "recordNostroStatement", "resolveNostroBreak",
     ]
@@ -243,6 +276,7 @@ module {
       ("beginReplay", "a verification: the fold of the logs recomputed into the replay's own arena, which writes nothing the desk reads; the caller chooses nothing"),
       ("advanceReplay", "a verification step over the recorded blocks in order; the caller chooses nothing but how many"),
       ("driveSettlement", "the next step of an instruction recorded through four eyes: the calls it makes are the instruction's, the outcome is Tachyon's, and the caller chooses nothing"),
+      ("advanceRiskSweep", "one slice of a sweep opened under dual control: the rows walked are the next in order, the figures are the fold's, and the caller chooses nothing"),
     ]
   };
 

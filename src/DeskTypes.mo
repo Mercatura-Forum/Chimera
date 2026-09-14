@@ -28,6 +28,8 @@ import CuT "CustodyTypes";
 import ST "SettlementTypes";
 import FT "FinancingTypes";
 import VT "ValuationTypes";
+import CoT "CollateralTypes";
+import LT "LimitTypes";
 
 module {
 
@@ -134,6 +136,22 @@ module {
     #designateHedge : { hedging : TT.DealId; hedged : TT.DealId; kind : VT.HedgeKind };
     #assessHedge : { hedge : VT.HedgeId; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
     #dedesignateHedge : { hedge : VT.HedgeId; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    // ── collateral: the agreements, the pools, the calls ──
+    #setCollateralPolicy : CoT.Policy;
+    #setCollateralAgreement : { agreement : CoT.Agreement };
+    #postCollateralCash : { agreement : CoT.AgreementId; move : CoT.CashMove; amount : Nat; currency : Text; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    #pledgeCollateral : { agreement : CoT.AgreementId; lot : TT.DealId; nominal : Nat };
+    #releaseCollateral : { agreement : CoT.AgreementId; pledge : Nat };
+    #receiveCollateral : { agreement : CoT.AgreementId; isin : Text; depot : Text; nominal : Nat };
+    #returnCollateral : { agreement : CoT.AgreementId; receipt : Nat };
+    #openCollateralSubstitution : { agreement : CoT.AgreementId; lot : TT.DealId; nominal : Nat; cashReturned : Nat; currency : Text };
+    #settleCollateralSubstitution : { agreement : CoT.AgreementId; substitution : Nat; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    #settleCollateralInterest : { agreement : CoT.AgreementId; currency : Text; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    // ── limits: the tree, the counterparties' group and country, the risk sweep ──
+    #setLimitNode : { node : LT.Node };
+    #removeLimitNode : { node : LT.NodeId };
+    #amendCounterparty : { counterparty : LT.Counterparty };
+    #openRiskSweep : { sliceSize : Nat };
     // ── treasury: the thirteen commands of Manticore's treasury domain, their bodies Manticore's ──
     #setTreasuryPolicy : TT.Policy;
     #registerSecurity : { terms : TT.SecurityTerms };
@@ -203,6 +221,8 @@ module {
     #settlement : ST.Event;
     #financing : FT.Event;
     #valuation : VT.Event;
+    #collateral : CoT.Event;
+    #limits : LT.Event;
   };
 
   public type BatchError = {
@@ -276,6 +296,8 @@ module {
     #SettlementError : { error : ST.Error };
     #FinancingError : { error : FT.Error };
     #ValuationError : { error : VT.Error };
+    #CollateralError : { error : CoT.Error };
+    #LimitError : { error : LT.Error };
     #MissingRate : { currency : Text; asOf : Day };
   };
 
@@ -373,6 +395,8 @@ module {
       case (#settlement(_)) "settlement";
       case (#financing(_)) "financing";
       case (#valuation(_)) "valuation";
+      case (#collateral(_)) "collateral";
+      case (#limits(_)) "limits";
     }
   };
 }

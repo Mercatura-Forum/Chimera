@@ -7,4 +7,7 @@
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 V="$ROOT/vendor"
-echo "$(mops sources 2>/dev/null) --package kernel $V/thebes-kernel/src --package manticore $V/manticore/src/bank --package journal $V/manticore/vendor/thebes-ledger-core/src/journal --package ledger $V/manticore/vendor/thebes-ledger-core/src/ledger --package tachyon $V/tachyon/core/src"
+# mops emits paths relative to this repository; they are made absolute so a build run from a vendored tree (the
+# Tachyon fixtures) resolves the same packages.
+MOPS="$(cd "$ROOT" && mops sources 2>/dev/null | sed "s# \.mops/# $ROOT/.mops/#g")"
+echo "$MOPS --package kernel $V/thebes-kernel/src --package manticore $V/manticore/src/bank --package journal $V/manticore/vendor/thebes-ledger-core/src/journal --package ledger $V/manticore/vendor/thebes-ledger-core/src/ledger --package tachyon $V/tachyon/core/src"

@@ -39,6 +39,8 @@ import CuT "CustodyTypes";
 import ST "SettlementTypes";
 import FT "FinancingTypes";
 import VT "ValuationTypes";
+import CoT "CollateralTypes";
+import LT "LimitTypes";
 import TT "mo:manticore/TreasuryTypes";
 
 import T "DeskTypes";
@@ -224,8 +226,8 @@ module {
   func rCycle(r : JC.Reader) : ?ST.Cycle { let ?businessDate = r.nat() else return null; let ?market = r.text() else return null; let ?priceSource = r.text() else return null; ?{ businessDate; market; priceSource } };
   func wRole(w : JC.Writer, x : ST.Role) { w.byte(switch (x) { case (#maker) 1; case (#taker) 2 }) };
   func rRole(r : JC.Reader) : ?ST.Role { switch (r.byte()) { case (?1) ?#maker; case (?2) ?#taker; case (_) null } };
-  func wFamily(w : JC.Writer, f : ST.Family) { w.byte(switch (f) { case (#treasury) 0; case (#repo) 1; case (#loan) 2 }) };
-  func rFamily(r : JC.Reader) : ?ST.Family { switch (r.byte()) { case (?0) ?#treasury; case (?1) ?#repo; case (?2) ?#loan; case (_) null } };
+  func wFamily(w : JC.Writer, f : ST.Family) { w.byte(switch (f) { case (#treasury) 0; case (#repo) 1; case (#loan) 2; case (#collateral) 3 }) };
+  func rFamily(r : JC.Reader) : ?ST.Family { switch (r.byte()) { case (?0) ?#treasury; case (?1) ?#repo; case (?2) ?#loan; case (?3) ?#collateral; case (_) null } };
   func wInstruction(w : JC.Writer, i : ST.Instruction) {
     wFamily(w, i.family); w.nat(i.deal); w.nat(i.leg); w.nat(i.cycle); wRole(w, i.role); w.principal(i.counterparty); w.principal(i.assetLedger); w.nat(i.assetAmount); w.principal(i.cashLedger); w.nat(i.cashAmount);
     w.optNat(i.tradeId); w.text(i.reference); w.blob(i.documentHash);
@@ -301,6 +303,134 @@ module {
       case (?0x04) { let ?hedging = r.nat() else return null; let ?hedged = r.nat() else return null; let ?kind = rHedgeKind(r) else return null; let ?hypothetical = rOptIrs(r) else return null; let ?hedgingMark = rInt(r) else return null; let ?hedgedValue = rInt(r) else return null; let ?day = r.nat() else return null; ?#hedgeDesignated({ hedging; hedged; kind; hypothetical; hedgingMark; hedgedValue; day }) };
       case (?0x05) { let ?hedge = r.nat() else return null; let ?hedgingChange = rInt(r) else return null; let ?hedgedChange = rInt(r) else return null; let ?effectivenessBps = r.nat() else return null; let ?effective = rInt(r) else return null; let ?ineffective = rInt(r) else return null; let ?day = r.nat() else return null; ?#hedgeAssessed({ hedge; hedgingChange; hedgedChange; effectivenessBps; effective; ineffective; day }) };
       case (?0x06) { let ?hedge = r.nat() else return null; let ?reclassified = rInt(r) else return null; let ?day = r.nat() else return null; ?#hedgeDedesignated({ hedge; reclassified; day }) };
+      case (_) null;
+    }
+  };
+
+  // ─── collateral ───
+  func wCollateralPolicy(w : JC.Writer, p : CoT.Policy) { for (a in [p.cashReceivedPayable, p.cashGivenReceivable, p.interestPayable, p.interestReceivable, p.interestExpense, p.interestIncome].vals()) w.text(a) };
+  func rCollateralPolicy(r : JC.Reader) : ?CoT.Policy {
+    let ?cashReceivedPayable = r.text() else return null; let ?cashGivenReceivable = r.text() else return null; let ?interestPayable = r.text() else return null;
+    let ?interestReceivable = r.text() else return null; let ?interestExpense = r.text() else return null; let ?interestIncome = r.text() else return null;
+    ?{ cashReceivedPayable; cashGivenReceivable; interestPayable; interestReceivable; interestExpense; interestIncome }
+  };
+  func wCoverage(w : JC.Writer, c : CoT.Coverage) { w.byte(switch (c) { case (#treasury) 1; case (#calls) 2; case (#repos) 3; case (#loans) 4 }) };
+  func rCoverage(r : JC.Reader) : ?CoT.Coverage { switch (r.byte()) { case (?1) ?#treasury; case (?2) ?#calls; case (?3) ?#repos; case (?4) ?#loans; case (_) null } };
+  func wAgreement(w : JC.Writer, a : CoT.Agreement) {
+    w.text(a.id); TyCan.writeCounterparty(w, a.counterparty); w.text(a.currency); w.nat(a.threshold); w.nat(a.minimumTransfer); w.nat(a.rounding); w.bool(a.netting);
+    w.len16(a.covers.size()); for (c in a.covers.vals()) wCoverage(w, c);
+    switch (a.schedule) { case null w.byte(0); case (?rows) { w.byte(1); w.len16(rows.size()); for (h in rows.vals()) { wClass(w, h.classification); w.nat(h.fromDays); w.nat(h.toDays); w.nat(h.haircutBps) } } };
+    w.nat(a.cashRateBps); PC.wConvention(w, a.dayCount); wCash(w, a.cash); w.nat(a.graceDays);
+  };
+  func rAgreement(r : JC.Reader) : ?CoT.Agreement {
+    let ?id = r.text() else return null; let ?counterparty = TyCan.readCounterparty(r) else return null; let ?currency = r.text() else return null; let ?threshold = r.nat() else return null;
+    let ?minimumTransfer = r.nat() else return null; let ?rounding = r.nat() else return null; let ?netting = r.bool() else return null;
+    let ?nc = r.len16() else return null; if (nc > 4) return null;
+    let cov = List.empty<CoT.Coverage>(); var i = 0; while (i < nc) { let ?c = rCoverage(r) else return null; List.add(cov, c); i += 1 };
+    let schedule : ?[CoT.HaircutRow] = switch (r.byte()) {
+      case (?0) null;
+      case (?1) {
+        let ?n = r.len16() else return null; if (n > 64) return null;
+        let rows = List.empty<CoT.HaircutRow>(); var j = 0;
+        while (j < n) { let ?classification = rClass(r) else return null; let ?fromDays = r.nat() else return null; let ?toDays = r.nat() else return null; let ?haircutBps = r.nat() else return null; List.add(rows, { classification; fromDays; toDays; haircutBps }); j += 1 };
+        ?List.toArray(rows)
+      };
+      case (_) return null;
+    };
+    let ?cashRateBps = r.nat() else return null; let ?dayCount = PC.rConvention(r) else return null; let ?cash = rCash(r) else return null; let ?graceDays = r.nat() else return null;
+    ?{ id; counterparty; currency; threshold; minimumTransfer; rounding; netting; covers = List.toArray(cov); schedule; cashRateBps; dayCount; cash; graceDays }
+  };
+  func wMove(w : JC.Writer, m : CoT.CashMove) { w.byte(switch (m) { case (#received) 1; case (#given) 2; case (#receivedReturned) 3; case (#givenReturned) 4 }) };
+  func rMove(r : JC.Reader) : ?CoT.CashMove { switch (r.byte()) { case (?1) ?#received; case (?2) ?#given; case (?3) ?#receivedReturned; case (?4) ?#givenReturned; case (_) null } };
+  func wCollateralEvent(w : JC.Writer, e : CoT.Event) {
+    switch (e) {
+      case (#policySet(p)) { w.byte(0x01); wCollateralPolicy(w, p) };
+      case (#agreementSet(x)) { w.byte(0x02); wAgreement(w, x.agreement); w.nat(x.day) };
+      case (#cashMoved(x)) { w.byte(0x03); w.text(x.agreement); wMove(w, x.move); w.nat(x.amount); w.text(x.currency); w.nat(x.callCredit); wInt(w, x.interestCatchUp); w.nat(x.day) };
+      case (#securitiesPledged(x)) { w.byte(0x04); w.text(x.agreement); w.nat(x.id); w.nat(x.lot); w.text(x.isin); w.text(x.depot); w.nat(x.nominal); w.nat(x.callCredit); w.nat(x.day) };
+      case (#securitiesReleased(x)) { w.byte(0x05); w.text(x.agreement); w.nat(x.pledge); w.nat(x.callCredit); w.nat(x.day) };
+      case (#securitiesReceived(x)) { w.byte(0x06); w.text(x.agreement); w.nat(x.id); w.text(x.isin); w.text(x.depot); w.nat(x.nominal); w.nat(x.callCredit); w.nat(x.day) };
+      case (#securitiesReturned(x)) { w.byte(0x07); w.text(x.agreement); w.nat(x.receipt); w.nat(x.callCredit); w.nat(x.day) };
+      case (#substitutionOpened(x)) { w.byte(0x08); w.text(x.agreement); w.nat(x.id); w.nat(x.lot); w.text(x.isin); w.text(x.depot); w.nat(x.nominal); w.nat(x.cashReturned); w.text(x.currency); w.nat(x.day) };
+      case (#substitutionSettled(x)) { w.byte(0x09); w.text(x.agreement); w.nat(x.substitution); w.nat(x.callCredit); wInt(w, x.interestCatchUp); w.nat(x.day) };
+      case (#interestAccrued(x)) { w.byte(0x0A); w.text(x.agreement); w.text(x.currency); wInt(w, x.interest); w.nat(x.day) };
+      case (#interestSettled(x)) { w.byte(0x0B); w.text(x.agreement); w.text(x.currency); wInt(w, x.amount); w.nat(x.day) };
+      case (#exposureRecorded(x)) { w.byte(0x0C); w.text(x.agreement); w.nat(x.day); wInt(w, x.exposure); wInt(w, x.balance); w.nat(x.rows) };
+      case (#callRaised(x)) { w.byte(0x0D); w.text(x.agreement); w.nat(x.id); w.nat(x.amount); w.bool(x.deliver); w.nat(x.day); w.nat(x.due) };
+      case (#callMet(x)) { w.byte(0x0E); w.text(x.agreement); w.nat(x.call); w.nat(x.day) };
+      case (#callSuperseded(x)) { w.byte(0x0F); w.text(x.agreement); w.nat(x.call); w.nat(x.outstanding); w.nat(x.day) };
+    }
+  };
+  func rCollateralEvent(r : JC.Reader) : ?CoT.Event {
+    switch (r.byte()) {
+      case (?0x01) { let ?p = rCollateralPolicy(r) else return null; ?#policySet(p) };
+      case (?0x02) { let ?agreement = rAgreement(r) else return null; let ?day = r.nat() else return null; ?#agreementSet({ agreement; day }) };
+      case (?0x03) { let ?agreement = r.text() else return null; let ?move = rMove(r) else return null; let ?amount = r.nat() else return null; let ?currency = r.text() else return null; let ?callCredit = r.nat() else return null; let ?interestCatchUp = rInt(r) else return null; let ?day = r.nat() else return null; ?#cashMoved({ agreement; move; amount; currency; callCredit; interestCatchUp; day }) };
+      case (?0x04) { let ?agreement = r.text() else return null; let ?id = r.nat() else return null; let ?lot = r.nat() else return null; let ?isin = r.text() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?callCredit = r.nat() else return null; let ?day = r.nat() else return null; ?#securitiesPledged({ agreement; id; lot; isin; depot; nominal; callCredit; day }) };
+      case (?0x05) { let ?agreement = r.text() else return null; let ?pledge = r.nat() else return null; let ?callCredit = r.nat() else return null; let ?day = r.nat() else return null; ?#securitiesReleased({ agreement; pledge; callCredit; day }) };
+      case (?0x06) { let ?agreement = r.text() else return null; let ?id = r.nat() else return null; let ?isin = r.text() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?callCredit = r.nat() else return null; let ?day = r.nat() else return null; ?#securitiesReceived({ agreement; id; isin; depot; nominal; callCredit; day }) };
+      case (?0x07) { let ?agreement = r.text() else return null; let ?receipt = r.nat() else return null; let ?callCredit = r.nat() else return null; let ?day = r.nat() else return null; ?#securitiesReturned({ agreement; receipt; callCredit; day }) };
+      case (?0x08) { let ?agreement = r.text() else return null; let ?id = r.nat() else return null; let ?lot = r.nat() else return null; let ?isin = r.text() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?cashReturned = r.nat() else return null; let ?currency = r.text() else return null; let ?day = r.nat() else return null; ?#substitutionOpened({ agreement; id; lot; isin; depot; nominal; cashReturned; currency; day }) };
+      case (?0x09) { let ?agreement = r.text() else return null; let ?substitution = r.nat() else return null; let ?callCredit = r.nat() else return null; let ?interestCatchUp = rInt(r) else return null; let ?day = r.nat() else return null; ?#substitutionSettled({ agreement; substitution; callCredit; interestCatchUp; day }) };
+      case (?0x0A) { let ?agreement = r.text() else return null; let ?currency = r.text() else return null; let ?interest = rInt(r) else return null; let ?day = r.nat() else return null; ?#interestAccrued({ agreement; currency; interest; day }) };
+      case (?0x0B) { let ?agreement = r.text() else return null; let ?currency = r.text() else return null; let ?amount = rInt(r) else return null; let ?day = r.nat() else return null; ?#interestSettled({ agreement; currency; amount; day }) };
+      case (?0x0C) { let ?agreement = r.text() else return null; let ?day = r.nat() else return null; let ?exposure = rInt(r) else return null; let ?balance = rInt(r) else return null; let ?rows = r.nat() else return null; ?#exposureRecorded({ agreement; day; exposure; balance; rows }) };
+      case (?0x0D) { let ?agreement = r.text() else return null; let ?id = r.nat() else return null; let ?amount = r.nat() else return null; let ?deliver = r.bool() else return null; let ?day = r.nat() else return null; let ?due = r.nat() else return null; ?#callRaised({ agreement; id; amount; deliver; day; due }) };
+      case (?0x0E) { let ?agreement = r.text() else return null; let ?call = r.nat() else return null; let ?day = r.nat() else return null; ?#callMet({ agreement; call; day }) };
+      case (?0x0F) { let ?agreement = r.text() else return null; let ?call = r.nat() else return null; let ?outstanding = r.nat() else return null; let ?day = r.nat() else return null; ?#callSuperseded({ agreement; call; outstanding; day }) };
+      case (_) null;
+    }
+  };
+  // ─── limits ───
+  func wNodeKind(w : JC.Writer, k : LT.NodeKind) {
+    switch (k) {
+      case (#counterparty(t)) { w.byte(1); w.text(t) }; case (#group(t)) { w.byte(2); w.text(t) }; case (#country(t)) { w.byte(3); w.text(t) }; case (#issuer(t)) { w.byte(4); w.text(t) };
+      case (#instrumentClass(c)) { w.byte(5); wClass(w, c) }; case (#tenor(b)) { w.byte(6); w.nat(b.fromDays); w.nat(b.toDays) }; case (#book(t)) { w.byte(7); w.text(t) }; case (#desk(t)) { w.byte(8); w.text(t) };
+    }
+  };
+  func rNodeKind(r : JC.Reader) : ?LT.NodeKind {
+    switch (r.byte()) {
+      case (?1) { let ?t = r.text() else return null; ?#counterparty(t) }; case (?2) { let ?t = r.text() else return null; ?#group(t) }; case (?3) { let ?t = r.text() else return null; ?#country(t) }; case (?4) { let ?t = r.text() else return null; ?#issuer(t) };
+      case (?5) { let ?c = rClass(r) else return null; ?#instrumentClass(c) }; case (?6) { let ?fromDays = r.nat() else return null; let ?toDays = r.nat() else return null; ?#tenor({ fromDays; toDays }) };
+      case (?7) { let ?t = r.text() else return null; ?#book(t) }; case (?8) { let ?t = r.text() else return null; ?#desk(t) };
+      case (_) null;
+    }
+  };
+  func wNode(w : JC.Writer, n : LT.Node) { w.text(n.id); wNodeKind(w, n.kind); wOptText(w, n.parent); w.text(n.currency); w.nat(n.limit) };
+  func rNode(r : JC.Reader) : ?LT.Node { let ?id = r.text() else return null; let ?kind = rNodeKind(r) else return null; let ?parent = rOptText(r) else return null; let ?currency = r.text() else return null; let ?limit = r.nat() else return null; ?{ id; kind; parent; currency; limit } };
+  func wLimitFamily(w : JC.Writer, f : LT.Family) { w.byte(switch (f) { case (#treasury) 1; case (#call) 2; case (#repo) 3; case (#loan) 4 }) };
+  func rLimitFamily(r : JC.Reader) : ?LT.Family { switch (r.byte()) { case (?1) ?#treasury; case (?2) ?#call; case (?3) ?#repo; case (?4) ?#loan; case (_) null } };
+  func wTextNats(w : JC.Writer, xs : [(Text, Nat)]) { w.len16(xs.size()); for ((t, n) in xs.vals()) { w.text(t); w.nat(n) } };
+  func rTextNats(r : JC.Reader) : ?[(Text, Nat)] { let ?n = r.len16() else return null; let out = List.empty<(Text, Nat)>(); var i = 0; while (i < n) { let ?t = r.text() else return null; let ?v = r.nat() else return null; List.add(out, (t, v)); i += 1 }; ?List.toArray(out) };
+  func wLimitEvent(w : JC.Writer, e : LT.Event) {
+    switch (e) {
+      case (#nodeSet(x)) { w.byte(0x01); wNode(w, x.node); w.nat(x.day) };
+      case (#nodeRemoved(x)) { w.byte(0x02); w.text(x.node); w.nat(x.day) };
+      case (#counterpartyAmended(x)) { w.byte(0x03); w.text(x.counterparty.name); w.text(x.counterparty.group); w.text(x.counterparty.country); w.nat(x.day) };
+      case (#utilised(x)) { w.byte(0x04); wLimitFamily(w, x.family); w.nat(x.id); w.text(x.currency); w.nat(x.amount); wTexts(w, x.nodes); w.nat(x.day) };
+      case (#breached(x)) { w.byte(0x05); w.text(x.node); wLimitFamily(w, x.family); w.nat(x.id); w.nat(x.measured); w.nat(x.limit); w.principal(x.approver); w.nat(x.day) };
+      case (#breachRefused(x)) { w.byte(0x06); w.text(x.node); wLimitFamily(w, x.family); w.principal(x.subject); w.nat(x.amount); w.nat(x.measured); w.nat(x.limit); w.nat(x.day) };
+      case (#sweepOpened(x)) { w.byte(0x07); w.nat(x.day); w.nat(x.bound); w.nat(x.sliceSize) };
+      case (#sweepSliced(x)) { w.byte(0x08); w.nat(x.day); w.nat(x.slice); wLimitFamily(w, x.family); w.nat(x.visited); w.optBlob(x.nextCursor); w.bool(x.familyDone); wTextNats(w, x.nodes); w.len16(x.agreements.size()); for ((a, c, n) in x.agreements.vals()) { w.text(a); wInt(w, c); w.nat(n) } };
+      case (#sweepPublished(x)) { w.byte(0x09); w.nat(x.day); w.nat(x.slices); w.nat(x.rows); wTextNats(w, x.nodes) };
+    }
+  };
+  func rLimitEvent(r : JC.Reader) : ?LT.Event {
+    switch (r.byte()) {
+      case (?0x01) { let ?node = rNode(r) else return null; let ?day = r.nat() else return null; ?#nodeSet({ node; day }) };
+      case (?0x02) { let ?node = r.text() else return null; let ?day = r.nat() else return null; ?#nodeRemoved({ node; day }) };
+      case (?0x03) { let ?name = r.text() else return null; let ?group = r.text() else return null; let ?country = r.text() else return null; let ?day = r.nat() else return null; ?#counterpartyAmended({ counterparty = { name; group; country }; day }) };
+      case (?0x04) { let ?family = rLimitFamily(r) else return null; let ?id = r.nat() else return null; let ?currency = r.text() else return null; let ?amount = r.nat() else return null; let ?nodes = rTexts(r) else return null; let ?day = r.nat() else return null; ?#utilised({ family; id; currency; amount; nodes; day }) };
+      case (?0x05) { let ?node = r.text() else return null; let ?family = rLimitFamily(r) else return null; let ?id = r.nat() else return null; let ?measured = r.nat() else return null; let ?limit = r.nat() else return null; let ?approver = r.principal() else return null; let ?day = r.nat() else return null; ?#breached({ node; family; id; measured; limit; approver; day }) };
+      case (?0x06) { let ?node = r.text() else return null; let ?family = rLimitFamily(r) else return null; let ?subject = r.principal() else return null; let ?amount = r.nat() else return null; let ?measured = r.nat() else return null; let ?limit = r.nat() else return null; let ?day = r.nat() else return null; ?#breachRefused({ node; family; subject; amount; measured; limit; day }) };
+      case (?0x07) { let ?day = r.nat() else return null; let ?bound = r.nat() else return null; let ?sliceSize = r.nat() else return null; ?#sweepOpened({ day; bound; sliceSize }) };
+      case (?0x08) {
+        let ?day = r.nat() else return null; let ?slice = r.nat() else return null; let ?family = rLimitFamily(r) else return null; let ?visited = r.nat() else return null; let ?nextCursor = r.optBlob() else return null; let ?familyDone = r.bool() else return null; let ?nodes = rTextNats(r) else return null;
+        let ?n = r.len16() else return null; let ags = List.empty<(Text, Int, Nat)>(); var i = 0;
+        while (i < n) { let ?a = r.text() else return null; let ?c = rInt(r) else return null; let ?k = r.nat() else return null; List.add(ags, (a, c, k)); i += 1 };
+        ?#sweepSliced({ day; slice; family; visited; nextCursor; familyDone; nodes; agreements = List.toArray(ags) })
+      };
+      case (?0x09) { let ?day = r.nat() else return null; let ?slices = r.nat() else return null; let ?rows = r.nat() else return null; let ?nodes = rTextNats(r) else return null; ?#sweepPublished({ day; slices; rows; nodes }) };
       case (_) null;
     }
   };
@@ -492,6 +622,20 @@ module {
       case (#designateHedge(x)) { w.byte(0x82); w.nat(x.hedging); w.nat(x.hedged); wHedgeKind(w, x.kind) };
       case (#assessHedge(x)) { w.byte(0x83); w.nat(x.hedge); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
       case (#dedesignateHedge(x)) { w.byte(0x84); w.nat(x.hedge); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#setCollateralPolicy(p)) { w.byte(0x90); wCollateralPolicy(w, p) };
+      case (#setCollateralAgreement(x)) { w.byte(0x91); wAgreement(w, x.agreement) };
+      case (#postCollateralCash(x)) { w.byte(0x92); w.text(x.agreement); wMove(w, x.move); w.nat(x.amount); w.text(x.currency); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#pledgeCollateral(x)) { w.byte(0x93); w.text(x.agreement); w.nat(x.lot); w.nat(x.nominal) };
+      case (#releaseCollateral(x)) { w.byte(0x94); w.text(x.agreement); w.nat(x.pledge) };
+      case (#receiveCollateral(x)) { w.byte(0x95); w.text(x.agreement); w.text(x.isin); w.text(x.depot); w.nat(x.nominal) };
+      case (#returnCollateral(x)) { w.byte(0x96); w.text(x.agreement); w.nat(x.receipt) };
+      case (#openCollateralSubstitution(x)) { w.byte(0x97); w.text(x.agreement); w.nat(x.lot); w.nat(x.nominal); w.nat(x.cashReturned); w.text(x.currency) };
+      case (#settleCollateralSubstitution(x)) { w.byte(0x98); w.text(x.agreement); w.nat(x.substitution); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#settleCollateralInterest(x)) { w.byte(0x99); w.text(x.agreement); w.text(x.currency); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#setLimitNode(x)) { w.byte(0xA0); wNode(w, x.node) };
+      case (#removeLimitNode(x)) { w.byte(0xA1); w.text(x.node) };
+      case (#amendCounterparty(x)) { w.byte(0xA2); w.text(x.counterparty.name); w.text(x.counterparty.group); w.text(x.counterparty.country) };
+      case (#openRiskSweep(x)) { w.byte(0xA3); w.nat(x.sliceSize) };
       case (#setTreasuryPolicy(p)) { w.byte(0x20); TyCan.writePolicy(w, p) };
       case (#registerSecurity(x)) { w.byte(0x21); TyCan.writeSecurityTerms(w, x.terms) };
       case (#publishCurve(x)) { w.byte(0x22); TyCan.writeCurve(w, x.curve) };
@@ -587,6 +731,20 @@ module {
       case 0x82 { let ?hedging = r.nat() else return null; let ?hedged = r.nat() else return null; let ?kind = rHedgeKind(r) else return null; ?#designateHedge({ hedging; hedged; kind }) };
       case 0x83 { let ?hedge = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#assessHedge({ hedge; postingDate; valueDate; period; narration }) };
       case 0x84 { let ?hedge = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#dedesignateHedge({ hedge; postingDate; valueDate; period; narration }) };
+      case 0x90 { let ?p = rCollateralPolicy(r) else return null; ?#setCollateralPolicy(p) };
+      case 0x91 { let ?agreement = rAgreement(r) else return null; ?#setCollateralAgreement({ agreement }) };
+      case 0x92 { let ?agreement = r.text() else return null; let ?move = rMove(r) else return null; let ?amount = r.nat() else return null; let ?currency = r.text() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#postCollateralCash({ agreement; move; amount; currency; postingDate; valueDate; period; narration }) };
+      case 0x93 { let ?agreement = r.text() else return null; let ?lot = r.nat() else return null; let ?nominal = r.nat() else return null; ?#pledgeCollateral({ agreement; lot; nominal }) };
+      case 0x94 { let ?agreement = r.text() else return null; let ?pledge = r.nat() else return null; ?#releaseCollateral({ agreement; pledge }) };
+      case 0x95 { let ?agreement = r.text() else return null; let ?isin = r.text() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; ?#receiveCollateral({ agreement; isin; depot; nominal }) };
+      case 0x96 { let ?agreement = r.text() else return null; let ?receipt = r.nat() else return null; ?#returnCollateral({ agreement; receipt }) };
+      case 0x97 { let ?agreement = r.text() else return null; let ?lot = r.nat() else return null; let ?nominal = r.nat() else return null; let ?cashReturned = r.nat() else return null; let ?currency = r.text() else return null; ?#openCollateralSubstitution({ agreement; lot; nominal; cashReturned; currency }) };
+      case 0x98 { let ?agreement = r.text() else return null; let ?substitution = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#settleCollateralSubstitution({ agreement; substitution; postingDate; valueDate; period; narration }) };
+      case 0x99 { let ?agreement = r.text() else return null; let ?currency = r.text() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#settleCollateralInterest({ agreement; currency; postingDate; valueDate; period; narration }) };
+      case 0xA0 { let ?node = rNode(r) else return null; ?#setLimitNode({ node }) };
+      case 0xA1 { let ?node = r.text() else return null; ?#removeLimitNode({ node }) };
+      case 0xA2 { let ?name = r.text() else return null; let ?group = r.text() else return null; let ?country = r.text() else return null; ?#amendCounterparty({ counterparty = { name; group; country } }) };
+      case 0xA3 { let ?sliceSize = r.nat() else return null; ?#openRiskSweep({ sliceSize }) };
       case 0x79 { let ?family = rFamily(r) else return null; let ?id = r.nat() else return null; let ?leg = r.nat() else return null; let ?counterparty = r.principal() else return null; let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; ?#instructFinancing({ family; id; leg; counterparty; tradeId; reference }) };
       case 0x20 { let ?p = TyCan.readPolicy(r) else return null; ?#setTreasuryPolicy(p) };
       case 0x21 { let ?terms = TyCan.readSecurityTerms(r) else return null; ?#registerSecurity({ terms }) };
@@ -786,6 +944,8 @@ module {
       case (#settlement(se)) { w.byte(0x62); wSettlementEvent(w, se) };
       case (#financing(fe)) { w.byte(0x63); wFinancingEvent(w, fe) };
       case (#valuation(ve)) { w.byte(0x64); wValuationEvent(w, ve) };
+      case (#collateral(ce)) { w.byte(0x65); wCollateralEvent(w, ce) };
+      case (#limits(le)) { w.byte(0x66); wLimitEvent(w, le) };
     }
   };
 
@@ -834,6 +994,8 @@ module {
       case 0x62 { let ?se = rSettlementEvent(r) else return null; ?#settlement(se) };
       case 0x63 { let ?fe = rFinancingEvent(r) else return null; ?#financing(fe) };
       case 0x64 { let ?ve = rValuationEvent(r) else return null; ?#valuation(ve) };
+      case 0x65 { let ?ce = rCollateralEvent(r) else return null; ?#collateral(ce) };
+      case 0x66 { let ?le = rLimitEvent(r) else return null; ?#limits(le) };
       case _ null;
     };
     switch (out) {

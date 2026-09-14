@@ -17,6 +17,8 @@ import CuT "../../src/CustodyTypes";
 import ST "../../src/SettlementTypes";
 import FT "../../src/FinancingTypes";
 import VT "../../src/ValuationTypes";
+import CoT "../../src/CollateralTypes";
+import LT "../../src/LimitTypes";
 
 import T "../../src/DeskTypes";
 import Can "../../src/DeskCanonical";
@@ -54,8 +56,29 @@ module {
 
   public let irs : TT.Irs = { currency = "EGP"; notional = 20_000_000_00; payFixed = true; fixedBps = 2050; floatingIndex = "CBE-ON"; spreadBps = 25; start = 20670; maturity = 20850; paymentMonths = 1; dayCount = #a003_Act360; cash; discountCurve = "EGP-ZERO" };
 
+  public let collateralPolicy : CoT.Policy = { cashReceivedPayable = "2700"; cashGivenReceivable = "1700"; interestPayable = "2710"; interestReceivable = "1710"; interestExpense = "5700"; interestIncome = "4700" };
+  public let agreement : CoT.Agreement = { id = "CSA-CITI"; counterparty = citi; currency = "EGP"; threshold = 500_000_00; minimumTransfer = 100_000_00; rounding = 10_000_00; netting = true; covers = [#treasury, #calls, #repos, #loans]; schedule = ?[{ classification = #sovereign; fromDays = 0; toDays = 365; haircutBps = 100 }, { classification = #sovereign; fromDays = 366; toDays = 100_000; haircutBps = 300 }]; cashRateBps = 1800; dayCount = #a003_Act360; cash; graceDays = 2 };
+  public let agreementSupervisory : CoT.Agreement = { agreement with id = "CSA-HSBC"; counterparty = { citi with name = "HSBC" }; schedule = null; netting = false; covers = [#treasury] };
+  public let node : LT.Node = { id = "CP-CITI"; kind = #counterparty("CITI"); parent = ?"GRP-CITI"; currency = "EGP"; limit = 50_000_000_00 };
+  public let tenorNode : LT.Node = { id = "TENOR-1Y"; kind = #tenor({ fromDays = 0; toDays = 365 }); parent = null; currency = "EGP"; limit = 500_000_000_00 };
+  public let counterpartyRecord : LT.Counterparty = { name = "CITI"; group = "CITIGROUP"; country = "US" };
+
   public func samples() : [Freeze.Sample<T.Command>] {
     [
+      { family = "setCollateralPolicy"; command = #setCollateralPolicy(collateralPolicy) },
+      { family = "setCollateralAgreement"; command = #setCollateralAgreement({ agreement }) },
+      { family = "postCollateralCash"; command = #postCollateralCash({ agreement = "CSA-CITI"; move = #received; amount = 1_200_000_00; currency = "EGP"; postingDate = 20671; valueDate = 20671; period = "2026-08"; narration = "collateral cash" }) },
+      { family = "pledgeCollateral"; command = #pledgeCollateral({ agreement = "CSA-CITI"; lot = 40; nominal = 2_000_000_00 }) },
+      { family = "releaseCollateral"; command = #releaseCollateral({ agreement = "CSA-CITI"; pledge = 120 }) },
+      { family = "receiveCollateral"; command = #receiveCollateral({ agreement = "CSA-CITI"; isin = "EG0000012345"; depot = "DEPOT-CITI"; nominal = 1_000_000_00 }) },
+      { family = "returnCollateral"; command = #returnCollateral({ agreement = "CSA-CITI"; receipt = 121 }) },
+      { family = "openCollateralSubstitution"; command = #openCollateralSubstitution({ agreement = "CSA-CITI"; lot = 40; nominal = 1_000_000_00; cashReturned = 900_000_00; currency = "EGP" }) },
+      { family = "settleCollateralSubstitution"; command = #settleCollateralSubstitution({ agreement = "CSA-CITI"; substitution = 122; postingDate = 20672; valueDate = 20672; period = "2026-08"; narration = "substitution" }) },
+      { family = "settleCollateralInterest"; command = #settleCollateralInterest({ agreement = "CSA-CITI"; currency = "EGP"; postingDate = 20700; valueDate = 20700; period = "2026-08"; narration = "collateral interest" }) },
+      { family = "setLimitNode"; command = #setLimitNode({ node }) },
+      { family = "removeLimitNode"; command = #removeLimitNode({ node = "TENOR-1Y" }) },
+      { family = "amendCounterparty"; command = #amendCounterparty({ counterparty = counterpartyRecord }) },
+      { family = "openRiskSweep"; command = #openRiskSweep({ sliceSize = 256 }) },
       { family = "setValuationPolicy"; command = #setValuationPolicy({ hedgeReserve = "3600" }) },
       { family = "quoteBondYield"; command = #quoteBondYield({ isin = "EG0000012345"; day = 20670; yieldBps = 1180; source = h(8) }) },
       { family = "designateHedge"; command = #designateHedge({ hedging = 45; hedged = 40; kind = #cashFlow({ hedgedAmount = 8_000_000_00 }) }) },
@@ -247,6 +270,34 @@ module {
       #valuation(#hedgeDesignated({ hedging = 45; hedged = 40; kind = #fairValue; hypothetical = null; hedgingMark = 12_345; hedgedValue = 9_800_000_00; day = 20670 })),
       #valuation(#hedgeAssessed({ hedge = 95; hedgingChange = 10_000; hedgedChange = -8_000; effectivenessBps = 8000; effective = 8_000; ineffective = 2_000; day = 20700 })),
       #valuation(#hedgeDedesignated({ hedge = 95; reclassified = 8_000; day = 20710 })),
+      #collateral(#policySet(collateralPolicy)),
+      #collateral(#agreementSet({ agreement; day = 20670 })),
+      #collateral(#agreementSet({ agreement = agreementSupervisory; day = 20670 })),
+      #collateral(#cashMoved({ agreement = "CSA-CITI"; move = #received; amount = 1_200_000_00; currency = "EGP"; callCredit = 1_200_000_00; interestCatchUp = -1_234; day = 20671 })),
+      #collateral(#securitiesPledged({ agreement = "CSA-CITI"; id = 120; lot = 40; isin = "EG0000012345"; depot = "DEPOT-CITI"; nominal = 2_000_000_00; callCredit = 0; day = 20671 })),
+      #collateral(#securitiesReleased({ agreement = "CSA-CITI"; pledge = 120; callCredit = 0; day = 20680 })),
+      #collateral(#securitiesReceived({ agreement = "CSA-CITI"; id = 121; isin = "EG0000012345"; depot = "DEPOT-CITI"; nominal = 1_000_000_00; callCredit = 950_000_00; day = 20671 })),
+      #collateral(#securitiesReturned({ agreement = "CSA-CITI"; receipt = 121; callCredit = 0; day = 20690 })),
+      #collateral(#substitutionOpened({ agreement = "CSA-CITI"; id = 122; lot = 40; isin = "EG0000012345"; depot = "DEPOT-CITI"; nominal = 1_000_000_00; cashReturned = 900_000_00; currency = "EGP"; day = 20672 })),
+      #collateral(#substitutionSettled({ agreement = "CSA-CITI"; substitution = 122; callCredit = 60_000_00; interestCatchUp = 0; day = 20672 })),
+      #collateral(#interestAccrued({ agreement = "CSA-CITI"; currency = "EGP"; interest = -600_00; day = 20672 })),
+      #collateral(#interestSettled({ agreement = "CSA-CITI"; currency = "EGP"; amount = -600_00; day = 20700 })),
+      #collateral(#exposureRecorded({ agreement = "CSA-CITI"; day = 20672; exposure = 1_850_000_00; balance = 1_150_000_00; rows = 7 })),
+      #collateral(#callRaised({ agreement = "CSA-CITI"; id = 130; amount = 200_000_00; deliver = false; day = 20672; due = 20673 })),
+      #collateral(#callMet({ agreement = "CSA-CITI"; call = 130; day = 20673 })),
+      #collateral(#callSuperseded({ agreement = "CSA-CITI"; call = 130; outstanding = 50_000_00; day = 20674 })),
+      #limits(#nodeSet({ node; day = 20670 })),
+      #limits(#nodeSet({ node = tenorNode; day = 20670 })),
+      #limits(#nodeSet({ node = { id = "CLS-SOV"; kind = #instrumentClass(#sovereign); parent = null; currency = "EGP"; limit = 1 }; day = 20670 })),
+      #limits(#nodeRemoved({ node = "TENOR-1Y"; day = 20680 })),
+      #limits(#counterpartyAmended({ counterparty = counterpartyRecord; day = 20670 })),
+      #limits(#utilised({ family = #treasury; id = 40; currency = "EGP"; amount = 9_850_000_00; nodes = ["CP-CITI", "GRP-CITI"]; day = 20670 })),
+      #limits(#breached({ node = "GRP-CITI"; family = #call; id = 41; measured = 60_000_000_00; limit = 50_000_000_00; approver = bob(); day = 20670 })),
+      #limits(#breachRefused({ node = "CP-CITI"; family = #repo; subject = alice(); amount = 9_500_000_00; measured = 60_000_000_00; limit = 50_000_000_00; day = 20670 })),
+      #limits(#sweepOpened({ day = 20672; bound = 140; sliceSize = 256 })),
+      #limits(#sweepSliced({ day = 20672; slice = 0; family = #treasury; visited = 256; nextCursor = ?h(9); familyDone = false; nodes = [("CP-CITI", 9_850_000_00)]; agreements = [("CSA-CITI", -1_234_00, 3)] })),
+      #limits(#sweepSliced({ day = 20672; slice = 1; family = #loan; visited = 3; nextCursor = null; familyDone = true; nodes = []; agreements = [] })),
+      #limits(#sweepPublished({ day = 20672; slices = 5; rows = 300; nodes = [("CP-CITI", 9_850_000_00), ("GRP-CITI", 12_000_000_00)] })),
     ]
   };
 }

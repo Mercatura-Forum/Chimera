@@ -150,7 +150,7 @@ class Reader(V.Reader):
     def cycle(self):
         return {"businessDate": self.nat(), "market": self.text(), "priceSource": self.text()}
 
-    FAMILIES = {0: "treasury", 1: "repo", 2: "loan"}
+    FAMILIES = {0: "treasury", 1: "repo", 2: "loan", 3: "collateral"}
 
     def instruction(self):
         return {"family": self.FAMILIES[self.byte()], "deal": self.nat(), "leg": self.nat(), "cycle": self.nat(), "role": {1: "maker", 2: "taker"}[self.byte()], "counterparty": self.principal(),
@@ -274,6 +274,98 @@ class Reader(V.Reader):
         if t == 0x06:
             return {"hedgeDedesignated": {"hedge": self.nat(), "reclassified": self.int_(), "day": self.nat()}}
         raise ValueError(f"unknown valuation event tag {t:#x}")
+
+    # ── collateral and limits ──
+    COL_ACCOUNTS = ["cashReceivedPayable", "cashGivenReceivable", "interestPayable", "interestReceivable", "interestExpense", "interestIncome"]
+    COVERAGE = {1: "treasury", 2: "calls", 3: "repos", 4: "loans"}
+    MOVES = {1: "received", 2: "given", 3: "receivedReturned", 4: "givenReturned"}
+    LIMIT_FAMILIES = {1: "treasury", 2: "call", 3: "repo", 4: "loan"}
+
+    def collateral_policy(self):
+        return {k: self.text() for k in self.COL_ACCOUNTS}
+
+    def agreement(self):
+        a = {"id": self.text(), "counterparty": self.t_counterparty(), "currency": self.text(), "threshold": self.nat(), "minimumTransfer": self.nat(), "rounding": self.nat(), "netting": self.bool()}
+        a["covers"] = [self.COVERAGE[self.byte()] for _ in range(self.len16())]
+        b = self.byte()
+        assert b in (0, 1), "bad schedule option"
+        a["schedule"] = None if b == 0 else [{"classification": self.CLASSES[self.byte()], "fromDays": self.nat(), "toDays": self.nat(), "haircutBps": self.nat()} for _ in range(self.len16())]
+        a.update({"cashRateBps": self.nat(), "dayCount": self.p_convention(), "cash": self.cash(), "graceDays": self.nat()})
+        return a
+
+    def collateral_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"policySet": self.collateral_policy()}
+        if t == 0x02:
+            return {"agreementSet": {"agreement": self.agreement(), "day": self.nat()}}
+        if t == 0x03:
+            return {"cashMoved": {"agreement": self.text(), "move": self.MOVES[self.byte()], "amount": self.nat(), "currency": self.text(), "callCredit": self.nat(), "interestCatchUp": self.int_(), "day": self.nat()}}
+        if t == 0x04:
+            return {"securitiesPledged": {"agreement": self.text(), "id": self.nat(), "lot": self.nat(), "isin": self.text(), "depot": self.text(), "nominal": self.nat(), "callCredit": self.nat(), "day": self.nat()}}
+        if t == 0x05:
+            return {"securitiesReleased": {"agreement": self.text(), "pledge": self.nat(), "callCredit": self.nat(), "day": self.nat()}}
+        if t == 0x06:
+            return {"securitiesReceived": {"agreement": self.text(), "id": self.nat(), "isin": self.text(), "depot": self.text(), "nominal": self.nat(), "callCredit": self.nat(), "day": self.nat()}}
+        if t == 0x07:
+            return {"securitiesReturned": {"agreement": self.text(), "receipt": self.nat(), "callCredit": self.nat(), "day": self.nat()}}
+        if t == 0x08:
+            return {"substitutionOpened": {"agreement": self.text(), "id": self.nat(), "lot": self.nat(), "isin": self.text(), "depot": self.text(), "nominal": self.nat(), "cashReturned": self.nat(), "currency": self.text(), "day": self.nat()}}
+        if t == 0x09:
+            return {"substitutionSettled": {"agreement": self.text(), "substitution": self.nat(), "callCredit": self.nat(), "interestCatchUp": self.int_(), "day": self.nat()}}
+        if t == 0x0A:
+            return {"interestAccrued": {"agreement": self.text(), "currency": self.text(), "interest": self.int_(), "day": self.nat()}}
+        if t == 0x0B:
+            return {"interestSettled": {"agreement": self.text(), "currency": self.text(), "amount": self.int_(), "day": self.nat()}}
+        if t == 0x0C:
+            return {"exposureRecorded": {"agreement": self.text(), "day": self.nat(), "exposure": self.int_(), "balance": self.int_(), "rows": self.nat()}}
+        if t == 0x0D:
+            return {"callRaised": {"agreement": self.text(), "id": self.nat(), "amount": self.nat(), "deliver": self.bool(), "day": self.nat(), "due": self.nat()}}
+        if t == 0x0E:
+            return {"callMet": {"agreement": self.text(), "call": self.nat(), "day": self.nat()}}
+        if t == 0x0F:
+            return {"callSuperseded": {"agreement": self.text(), "call": self.nat(), "outstanding": self.nat(), "day": self.nat()}}
+        raise ValueError(f"unknown collateral event tag {t:#x}")
+
+    def node_kind(self):
+        k = self.byte()
+        if k in (1, 2, 3, 4, 7, 8):
+            return {{1: "counterparty", 2: "group", 3: "country", 4: "issuer", 7: "book", 8: "desk"}[k]: self.text()}
+        if k == 5:
+            return {"instrumentClass": self.CLASSES[self.byte()]}
+        if k == 6:
+            return {"tenor": {"fromDays": self.nat(), "toDays": self.nat()}}
+        raise ValueError(f"unknown node kind {k}")
+
+    def node(self):
+        return {"id": self.text(), "kind": self.node_kind(), "parent": self.opt_text(), "currency": self.text(), "limit": self.nat()}
+
+    def text_nats(self):
+        return [(self.text(), self.nat()) for _ in range(self.len16())]
+
+    def limit_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"nodeSet": {"node": self.node(), "day": self.nat()}}
+        if t == 0x02:
+            return {"nodeRemoved": {"node": self.text(), "day": self.nat()}}
+        if t == 0x03:
+            return {"counterpartyAmended": {"counterparty": {"name": self.text(), "group": self.text(), "country": self.text()}, "day": self.nat()}}
+        if t == 0x04:
+            return {"utilised": {"family": self.LIMIT_FAMILIES[self.byte()], "id": self.nat(), "currency": self.text(), "amount": self.nat(), "nodes": self.texts(), "day": self.nat()}}
+        if t == 0x05:
+            return {"breached": {"node": self.text(), "family": self.LIMIT_FAMILIES[self.byte()], "id": self.nat(), "measured": self.nat(), "limit": self.nat(), "approver": self.principal(), "day": self.nat()}}
+        if t == 0x06:
+            return {"breachRefused": {"node": self.text(), "family": self.LIMIT_FAMILIES[self.byte()], "subject": self.principal(), "amount": self.nat(), "measured": self.nat(), "limit": self.nat(), "day": self.nat()}}
+        if t == 0x07:
+            return {"sweepOpened": {"day": self.nat(), "bound": self.nat(), "sliceSize": self.nat()}}
+        if t == 0x08:
+            e = {"day": self.nat(), "slice": self.nat(), "family": self.LIMIT_FAMILIES[self.byte()], "visited": self.nat(), "nextCursor": self.opt_blob_(), "familyDone": self.bool(), "nodes": self.text_nats()}
+            e["agreements"] = [(self.text(), self.int_(), self.nat()) for _ in range(self.len16())]
+            return {"sweepSliced": e}
+        if t == 0x09:
+            return {"sweepPublished": {"day": self.nat(), "slices": self.nat(), "rows": self.nat(), "nodes": self.text_nats()}}
+        raise ValueError(f"unknown limits event tag {t:#x}")
 
     def payer(self):
         return {1: "desk", 2: "counterparty"}[self.byte()]
@@ -473,6 +565,34 @@ class Reader(V.Reader):
             return {"assessHedge": {"hedge": self.nat(), **self.dates()}}
         if tag == 0x84:
             return {"dedesignateHedge": {"hedge": self.nat(), **self.dates()}}
+        if tag == 0x90:
+            return {"setCollateralPolicy": self.collateral_policy()}
+        if tag == 0x91:
+            return {"setCollateralAgreement": {"agreement": self.agreement()}}
+        if tag == 0x92:
+            return {"postCollateralCash": {"agreement": self.text(), "move": self.MOVES[self.byte()], "amount": self.nat(), "currency": self.text(), **self.dates()}}
+        if tag == 0x93:
+            return {"pledgeCollateral": {"agreement": self.text(), "lot": self.nat(), "nominal": self.nat()}}
+        if tag == 0x94:
+            return {"releaseCollateral": {"agreement": self.text(), "pledge": self.nat()}}
+        if tag == 0x95:
+            return {"receiveCollateral": {"agreement": self.text(), "isin": self.text(), "depot": self.text(), "nominal": self.nat()}}
+        if tag == 0x96:
+            return {"returnCollateral": {"agreement": self.text(), "receipt": self.nat()}}
+        if tag == 0x97:
+            return {"openCollateralSubstitution": {"agreement": self.text(), "lot": self.nat(), "nominal": self.nat(), "cashReturned": self.nat(), "currency": self.text()}}
+        if tag == 0x98:
+            return {"settleCollateralSubstitution": {"agreement": self.text(), "substitution": self.nat(), **self.dates()}}
+        if tag == 0x99:
+            return {"settleCollateralInterest": {"agreement": self.text(), "currency": self.text(), **self.dates()}}
+        if tag == 0xA0:
+            return {"setLimitNode": {"node": self.node()}}
+        if tag == 0xA1:
+            return {"removeLimitNode": {"node": self.text()}}
+        if tag == 0xA2:
+            return {"amendCounterparty": {"counterparty": {"name": self.text(), "group": self.text(), "country": self.text()}}}
+        if tag == 0xA3:
+            return {"openRiskSweep": {"sliceSize": self.nat()}}
         raise ValueError(f"unknown command tag {tag:#x}")
 
     def proposed(self):
@@ -562,6 +682,10 @@ class Reader(V.Reader):
             return {"financing": self.financing_event()}
         if t == 0x64:
             return {"valuation": self.valuation_event()}
+        if t == 0x65:
+            return {"collateral": self.collateral_event()}
+        if t == 0x66:
+            return {"limits": self.limit_event()}
         raise ValueError(f"unknown desk event tag {t:#x}")
 
     # ── lifted without change from Manticore's verify_bank.py at 9c0c30e ──

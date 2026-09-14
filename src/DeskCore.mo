@@ -61,6 +61,13 @@ import VT "ValuationTypes";
 import Valuation "Valuation";
 import HedgeCore "HedgeCore";
 import Attribution "Attribution";
+import CoT "CollateralTypes";
+import CollateralCore "CollateralCore";
+import LT "LimitTypes";
+import LimitCore "LimitCore";
+import Shard "mo:kernel/sweep/Shard";
+import R "mo:kernel/rows/StableRows";
+import Map "mo:core/Map";
 import DT "mo:tachyon/DvpTypes";
 import Sha256 "mo:sha2/Sha256";
 import Calendar "mo:journal/Calendar";
@@ -85,6 +92,8 @@ module {
     financing : FinancingCore.State;
     hedges : HedgeCore.State;
     attribution : Attribution.State;
+    collateral : CollateralCore.State;
+    limits : LimitCore.State;
   };
 
   public func newState(installer : Principal) : State { newStateIn(installer, RI.newArena()) };
@@ -104,6 +113,8 @@ module {
       financing = FinancingCore.newState(arena);
       hedges = HedgeCore.newState(arena);
       attribution = Attribution.newState(arena);
+      collateral = CollateralCore.newState(arena);
+      limits = LimitCore.newState(arena);
     }
   };
 
@@ -188,7 +199,10 @@ module {
       case (#substituteCollateral(x)) bookOfRepo(s, x.repo);
       case (#settleLoanLeg(x)) bookOfLoan(s, x.loan);
       case (#recallLoan(x)) bookOfLoan(s, x.loan);
-      case (#instructFinancing(x)) { switch (x.family) { case (#repo) bookOfRepo(s, x.id); case (#loan) bookOfLoan(s, x.id); case (#treasury) bookOfDeal(s, x.id) } };
+      case (#instructFinancing(x)) { switch (x.family) { case (#repo) bookOfRepo(s, x.id); case (#loan) bookOfLoan(s, x.id); case (#treasury) bookOfDeal(s, x.id); case (#collateral) bookOfSubstitution(s, x.id) } };
+      case (#pledgeCollateral(x)) bookOfDeal(s, x.lot);
+      case (#openCollateralSubstitution(x)) bookOfDeal(s, x.lot);
+      case (#settleCollateralSubstitution(x)) bookOfSubstitution(s, x.substitution);
       case (#designateHedge(x)) bookOfDeal(s, x.hedging);
       case (#assessHedge(x)) { switch (HedgeCore.hedge(s.hedges, x.hedge)) { case (?h) bookOfDeal(s, h.hedging); case null null } };
       case (#dedesignateHedge(x)) { switch (HedgeCore.hedge(s.hedges, x.hedge)) { case (?h) bookOfDeal(s, h.hedging); case null null } };
@@ -201,6 +215,7 @@ module {
   func bookOfCall(s : State, call : Nat) : ?T.BookId { switch (CallCore.row(s.calls, call)) { case (?r) ?r.book; case null null } };
   func balanceOfCall(s : State, call : Nat) : [(Text, Nat)] { switch (CallCore.row(s.calls, call)) { case (?r) [(r.currency, r.balance)]; case null [] } };
   func bookOfDeal(s : State, deal : Nat) : ?T.BookId { switch (TreasuryCore.row(s.treasury, deal)) { case (?r) ?r.book; case null null } };
+  func bookOfSubstitution(s : State, id : Nat) : ?T.BookId { switch (CollateralCore.securitiesRow(s.collateral, id)) { case (?r) { switch (r.lot) { case (?l) bookOfDeal(s, l); case null null } }; case null null } };
   func notionalOfDeal(s : State, deal : Nat) : [(Text, Nat)] { switch (TreasuryCore.row(s.treasury, deal)) { case (?r) [(treasuryRowCurrency(s, r), r.notional)]; case null [] } };
   /// The currency a deal's result is in: the quote currency of a forward, a swap or an option, the instrument's
   /// currency of a lot, the deal's own otherwise.
@@ -254,7 +269,11 @@ module {
       case (#meetMarginCall(x)) { switch (FinancingCore.repo(s.financing, x.repo)) { case (?r) [(r.currency, x.cash)]; case null [] } };
       case (#openLoan(x)) [(x.terms.currency, FinancingCore.loanValue({ id = 0; state = #open; book = ""; cpHash = 0; currency = x.terms.currency; isin = x.terms.isin; nominal = x.terms.nominal; valueMicro = x.terms.valueMicro; feeBps = 0; dayCount = 0; cashCollateral = 0; rebateBps = 0; collateralIsin = ""; collateralNominal = 0; start = 0; noticeDays = 0; returnDay = 0; accrualFrom = 0; feeBefore = 0; feePosted = 0; rebateBefore = 0; rebatePosted = 0; manufactured = 0; depot = ""; lastBlock = 0; refHash = 0 }))];
       case (#settleLoanLeg(x)) { switch (FinancingCore.loan(s.financing, x.loan)) { case (?r) [(r.currency, FinancingCore.loanValue(r))]; case null [] } };
-      case (#instructFinancing(x)) { switch (x.family, FinancingCore.repo(s.financing, x.id), FinancingCore.loan(s.financing, x.id)) { case (#repo, ?r, _) [(r.currency, r.cash)]; case (#loan, _, ?l) [(l.currency, FinancingCore.loanValue(l))]; case (_) [] } };
+      case (#instructFinancing(x)) { switch (x.family, FinancingCore.repo(s.financing, x.id), FinancingCore.loan(s.financing, x.id)) { case (#repo, ?r, _) [(r.currency, r.cash)]; case (#loan, _, ?l) [(l.currency, FinancingCore.loanValue(l))]; case (#collateral, _, _) { switch (CollateralCore.securitiesRow(s.collateral, x.id)) { case (?r) [(r.currency, r.cashReturned)]; case null [] } }; case (_) [] } };
+      case (#postCollateralCash(x)) [(x.currency, x.amount)];
+      case (#openCollateralSubstitution(x)) [(x.currency, x.cashReturned)];
+      case (#settleCollateralSubstitution(x)) { switch (CollateralCore.securitiesRow(s.collateral, x.substitution)) { case (?r) [(r.currency, r.cashReturned)]; case null [] } };
+      case (#settleCollateralInterest(x)) [(x.currency, Int.abs(CollateralCore.cashRow(s.collateral, x.agreement, x.currency).interestAccrued))];
       case (#assessHedge(x)) { switch (HedgeCore.hedge(s.hedges, x.hedge)) { case (?h) notionalOfDeal(s, h.hedging); case null [] } };
       case (#dedesignateHedge(x)) { switch (HedgeCore.hedge(s.hedges, x.hedge)) { case (?h) notionalOfDeal(s, h.hedging); case null [] } };
       case (_) [];
@@ -325,6 +344,370 @@ module {
         }
       };
     }
+  };
+
+  // ─── the limit tree ─────────────────────────────────────────────────────────
+
+  func limitErr<X>(e : LT.Error) : Res<X> { #err(#LimitError({ error = e })) };
+  func collateralErr<X>(e : CoT.Error) : Res<X> { #err(#CollateralError({ error = e })) };
+  /// Whether a book is the desk named or lies under it in the book tree.
+  func isUnderBook(s : State) : (Text, Text) -> Bool {
+    func(book : Text, desk : Text) : Bool {
+      var cur : ?Text = ?book;
+      var depth = 0;
+      label up loop {
+        switch (cur) {
+          case (?b) { if (Text.equal(b, desk)) return true; cur := switch (Auth.getBook(s.authority, b)) { case (?bk) bk.parent; case null null } };
+          case null break up;
+        };
+        depth += 1;
+        if (depth > T.MAX_BOOK_DEPTH) break up;
+      };
+      false
+    }
+  };
+  func bookExists(s : State) : Text -> Bool { func(b : Text) : Bool { switch (Auth.getBook(s.authority, b)) { case (?bk) bk.open; case null false } } };
+  func daysLeft(maturity : Nat, day : Nat) : Nat { if (maturity > day) maturity - day else 0 };
+  /// What the tree measures of a treasury deal at capture: the principal, the base amount, the nominal or the
+  /// notional in the deal's currency; the instrument and its issuer for a purchase; the days left of a term.
+  func treasuryCaptureFacts(s : State, id : Nat, book : Text, cpHash : Nat, kind : TT.DealKind, day : Nat) : LimitCore.RowFacts {
+    let none : LimitCore.RowFacts = { family = #treasury; id; book; cpHash; currency = ""; amount = 0; isin = ""; issuerHash = 0; classification = null; remainingDays = null };
+    switch (kind) {
+      case (#moneyMarket(m)) { { none with currency = m.currency; amount = m.principal; remainingDays = ?daysLeft(m.maturity, day) } };
+      case (#fxForward(f)) { { none with currency = f.base; amount = f.baseAmount } };
+      case (#fxSwap(x)) { { none with currency = x.near.base; amount = x.near.baseAmount } };
+      case (#security(t)) {
+        let (currency, issuerHash, maturity) = switch (TreasuryCore.security(s.treasury, t.isin)) { case (?x) (x.currency, x.issuerHash, x.maturity); case null ("", 0, 0) };
+        let buy = t.direction == #buy;
+        let classification = if (buy) { switch (CustodyCore.instrument(s.custody, t.isin)) { case (?i) ?i.classification; case null null } } else null;
+        { none with currency; amount = t.nominal; isin = if (buy) t.isin else ""; issuerHash = if (buy) issuerHash else 0; classification; remainingDays = ?daysLeft(maturity, day) }
+      };
+      case (#irs(i)) { { none with currency = i.currency; amount = i.notional; remainingDays = ?daysLeft(i.maturity, day) } };
+      case (#fxOption(o)) { { none with currency = o.base; amount = o.baseAmount } };
+    }
+  };
+  /// The same facts read from a treasury row, as the sweep reads them: the nominal left of a security, the
+  /// notional of everything else.
+  func treasuryRowFacts(s : State, r : TreasuryCore.DealRow, day : Nat) : LimitCore.RowFacts {
+    let buy = (r.flags & TreasuryCore.F_BUY) != 0;
+    let (currency, issuerHash, classification) : (Text, Nat, ?CuT.Classification) = if (r.kind == 4) {
+      let sec = TreasuryCore.security(s.treasury, r.isin);
+      (switch (sec) { case (?x) x.currency; case null "" }, if (buy) { switch (sec) { case (?x) x.issuerHash; case null 0 } } else 0, if (buy) { switch (CustodyCore.instrument(s.custody, r.isin)) { case (?i) ?i.classification; case null null } } else null)
+    } else (r.currency, 0, null);
+    { family = #treasury; id = r.id; book = r.book; cpHash = r.cpHash; currency; amount = if (r.kind == 4) r.nominalLeft else r.notional; isin = if (buy) r.isin else ""; issuerHash; classification;
+      remainingDays = if (r.kind == 1 or r.kind == 4 or r.kind == 5) ?daysLeft(r.maturity, day) else null }
+  };
+  func callFacts(id : Nat, book : Text, cpHash : Nat, currency : Text, amount : Nat) : LimitCore.RowFacts {
+    { family = #call; id; book; cpHash; currency; amount; isin = ""; issuerHash = 0; classification = null; remainingDays = null }
+  };
+  func repoFacts(id : Nat, book : Text, cpHash : Nat, currency : Text, cash : Nat, maturity : Nat, day : Nat) : LimitCore.RowFacts {
+    { family = #repo; id; book; cpHash; currency; amount = cash; isin = ""; issuerHash = 0; classification = null; remainingDays = if (maturity == 0) null else ?daysLeft(maturity, day) }
+  };
+  func loanFacts(id : Nat, book : Text, cpHash : Nat, currency : Text, value : Nat) : LimitCore.RowFacts {
+    { family = #loan; id; book; cpHash; currency; amount = value; isin = ""; issuerHash = 0; classification = null; remainingDays = null }
+  };
+  /// The tree's verdict on a new row: the utilisation it records when the row falls under any node, and the
+  /// breaches it makes. A breach without an approver is a refusal; with one, every breach is recorded after the
+  /// row.
+  func treeEvents(s : State, f : LimitCore.RowFacts, approver : ?Principal, day : Nat) : Res<[T.Event]> {
+    let nodes = LimitCore.nodesFor(s.limits, LimitCore.prepare(s.limits), f, isUnderBook(s));
+    if (nodes.size() == 0) return #ok([]);
+    let breaches = LimitCore.breachesOf(s.limits, nodes, f.amount);
+    let out = List.empty<T.Event>();
+    List.add(out, #limits(#utilised({ family = f.family; id = f.id; currency = f.currency; amount = f.amount; nodes; day })));
+    if (breaches.size() > 0) {
+      switch (approver) {
+        case null { let (node, measured, limit) = breaches[0]; return limitErr(#Breached({ node; measured; limit })) };
+        case (?ap) { for ((node, measured, limit) in breaches.vals()) List.add(out, #limits(#breached({ node; family = f.family; id = f.id; measured; limit; approver = ap; day }))) };
+      };
+    };
+    #ok(List.toArray(out))
+  };
+  /// The facts of a command that adds a row to the tree, with the approver it names; nothing for any other.
+  func treeFactsOf(s : State, command : T.Command, day : Nat) : ?(LimitCore.RowFacts, ?Principal) {
+    switch (command) {
+      case (#captureDeal(x)) ?(treasuryCaptureFacts(s, s.height, x.book, TreasuryCore.hash8(x.counterparty.name), x.kind, day), x.approver);
+      case (#openCall(x)) ?(callFacts(s.height, x.book, TreasuryCore.hash8(x.counterparty.name), x.terms.currency, x.terms.principal), x.approver);
+      case (#adjustCallBalance(x)) {
+        if (x.delta <= 0) return null;
+        switch (CallCore.row(s.calls, x.call)) { case (?r) ?(callFacts(r.id, r.book, r.cpHash, r.currency, Int.abs(x.delta)), x.approver); case null null }
+      };
+      case (#openRepo(x)) ?(repoFacts(s.height, x.book, TreasuryCore.hash8(x.counterparty.name), x.terms.currency, x.terms.cash, switch (x.terms.maturity) { case (?m) m; case null 0 }, day), null);
+      case (#openLoan(x)) ?(loanFacts(s.height, x.book, TreasuryCore.hash8(x.counterparty.name), x.terms.currency, TreasuryMath.cleanCost(x.terms.nominal, x.terms.valueMicro)), null);
+      case (_) null;
+    }
+  };
+  func treeEventsOf(s : State, command : T.Command, day : Nat) : Res<[T.Event]> {
+    switch (treeFactsOf(s, command, day)) { case (?(f, approver)) treeEvents(s, f, approver, day); case null #ok([]) }
+  };
+  /// The refusal blocks a tree breach leaves: one per breached node, so the desk proves what it prevented.
+  public func refusalTrail(s : State, js : JCore.State, now : Nat64, subject : Principal, command : T.Command, e : T.Error) : [T.Event] {
+    switch (e) { case (#LimitError({ error = #Breached(_) })) {}; case (_) return [] };
+    let day = JCore.effectiveToday(js, now);
+    let ?(f, _) = treeFactsOf(s, command, day) else return [];
+    let nodes = LimitCore.nodesFor(s.limits, LimitCore.prepare(s.limits), f, isUnderBook(s));
+    Array.map<(Text, Nat, Nat), T.Event>(LimitCore.breachesOf(s.limits, nodes, f.amount), func((node, measured, limit)) { #limits(#breachRefused({ node; family = f.family; subject; amount = f.amount; measured; limit; day })) })
+  };
+
+  // ─── collateral ─────────────────────────────────────────────────────────────
+
+  func collateralPolicyOf(s : State) : Res<CoT.Policy> { switch (CollateralCore.policy(s.collateral)) { case (?p) #ok(p); case null collateralErr(#NoPolicy) } };
+  func agreementRow(s : State, id : Text) : Res<CollateralCore.AgreementRow> { switch (CollateralCore.requireAgreement(s.collateral, id)) { case (#ok(r)) #ok(r); case (#err(e)) collateralErr(e) } };
+  /// An amount in one currency stated in another at the day's recorded rates, through the functional currency.
+  func convertOn(s : State, amount : Nat, from : Text, to : Text, day : Nat) : Res<Nat> {
+    if (Text.equal(from, to)) return #ok(amount);
+    let ?functional = CloseCore.functional(s.close) else return #err(#NoFunctionalCurrency);
+    var q = TreasuryMath.ofNat(amount);
+    if (not Text.equal(from, functional)) { let ?r = CloseCore.rateOn(s.close, from, day) else return #err(#MissingRate({ currency = from; asOf = day })); q := TreasuryMath.mul(q, TreasuryMath.q(r.numerator, r.denominator)) };
+    if (not Text.equal(to, functional)) { let ?r = CloseCore.rateOn(s.close, to, day) else return #err(#MissingRate({ currency = to; asOf = day })); q := TreasuryMath.mul(q, TreasuryMath.q(r.denominator, r.numerator)) };
+    #ok(TreasuryMath.roundNat(q))
+  };
+  func convertSigned(s : State, amount : Int, from : Text, to : Text, day : Nat) : Res<Int> {
+    switch (convertOn(s, Int.abs(amount), from, to, day)) { case (#err(e)) #err(e); case (#ok(v)) #ok(if (amount < 0) -v else v) }
+  };
+  /// A security's value in an agreement's pool on a day: the day's price, the schedule's haircut for the
+  /// instrument's class and residual maturity, the mismatch add-on, in the agreement's currency.
+  func poolSecuritiesValue(s : State, a : CollateralCore.AgreementRow, isin : Text, nominal : Nat, day : Nat) : Res<Nat> {
+    let ?sec = TreasuryCore.security(s.treasury, isin) else return treasuryErr(#UnknownSecurity({ isin }));
+    let ?inst = CustodyCore.instrument(s.custody, isin) else return custodyErr(#UnknownInstrument({ isin }));
+    let ?price = priceOf(s, isin, day) else return collateralErr(#NoPrice({ isin; day }));
+    let ?cut = CollateralCore.haircutBps(s.collateral, a, inst.classification, daysLeft(sec.maturity, day)) else return collateralErr(#NoHaircut({ isin }));
+    convertOn(s, CollateralCore.securitiesValue(nominal, price, cut, not Text.equal(sec.currency, a.currency)), sec.currency, a.currency, day)
+  };
+  func poolCashValue(s : State, a : CollateralCore.AgreementRow, amount : Nat, currency : Text, day : Nat) : Res<Nat> {
+    convertOn(s, CollateralCore.cashValue(amount, not Text.equal(currency, a.currency)), currency, a.currency, day)
+  };
+  /// The credit support balance of an agreement on a day: what the desk holds less what it posted, cash and
+  /// securities, after haircuts, in the agreement's currency.
+  func poolBalance(s : State, a : CollateralCore.AgreementRow, day : Nat) : Res<Int> {
+    var bal : Int = 0;
+    for (c in CollateralCore.cashOf(s.collateral, a.id).vals()) {
+      let net : Int = (c.received : Int) - c.given;
+      if (net != 0) { let v = switch (poolCashValue(s, a, Int.abs(net), c.currency, day)) { case (#err(e)) return #err(e); case (#ok(v)) v }; bal += (if (net > 0) v else -v) };
+    };
+    for (r in CollateralCore.securitiesOf(s.collateral, a.id).vals()) {
+      if (r.state != #live) continue;
+      let v = switch (poolSecuritiesValue(s, a, r.isin, r.nominal, day)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+      bal += (if (r.given) -v else v);
+    };
+    #ok(bal)
+  };
+  /// What a movement credits to the agreement's open call: its value when the movement runs the call's way.
+  func callCreditFor(s : State, a : CollateralCore.AgreementRow, deskDelivers : Bool, value : Nat) : Nat {
+    if (a.openCall == 0) return 0;
+    switch (CollateralCore.call(s.collateral, a.openCall)) { case (?c) { if (c.state == CollateralCore.CALL_OPEN and c.deliver == deskDelivers) value else 0 }; case null 0 }
+  };
+  func callMetAfter(s : State, a : CollateralCore.AgreementRow, credit : Nat, day : Nat) : [T.Event] {
+    if (a.openCall == 0 or credit == 0) return [];
+    switch (CollateralCore.call(s.collateral, a.openCall)) { case (?c) { if (c.state == CollateralCore.CALL_OPEN and c.outstanding <= credit) [#collateral(#callMet({ agreement = a.id; call = c.id; day }))] else [] }; case null [] }
+  };
+  func collateralPost(s : State, js : JCore.State, journalCaller : Principal, now : Nat64, p : CoT.Policy, a : CollateralCore.AgreementRow, ev : CoT.Event, purpose : Text, parts : [Text], postingDate : Nat, valueDate : Nat, period : Text, narration : Text, extras : [T.Event]) : Res<Plan> {
+    let legs = CollateralCore.legsOf(p, a, ev);
+    if (legs.size() == 0) return #ok({ event = ?#collateral(ev); extra = extras; journal = [] });
+    switch (postLegs(js, journalCaller, now, purpose, parts, legs, postingDate, valueDate, period, narration)) {
+      case (#err(e)) #err(e);
+      case (#ok(plan)) #ok({ event = ?#collateral(ev); extra = extras; journal = plan.journal });
+    }
+  };
+  /// A lot of the desk's own that can be pledged: a settled purchase, held in a depot with enough available.
+  func pledgeableLot(s : State, lot : Nat, nominal : Nat) : Res<(TreasuryCore.DealRow, Text)> {
+    let r = switch (treasuryRow(s, lot)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+    if (r.kind != 4 or (r.flags & TreasuryCore.F_BUY) == 0) return custodyErr(#LotNotIn({ lot; state = "not a purchase" }));
+    if (nominal == 0) return collateralErr(#InvalidMove({ reason = "a pledge is a positive nominal" }));
+    var best : ?(Text, Nat) = null;
+    for ((h, _) in CustodyCore.holdingsOfLot(s.custody, lot).vals()) {
+      let d = CustodyCore.depotIdOfHash(s.custody, h);
+      let av = CustodyCore.available(s.custody, lot, d);
+      if (av >= nominal) return #ok((r, d));
+      switch (best) { case (?(_, b)) { if (av > b) best := ?(d, av) }; case null best := ?(d, av) };
+    };
+    switch (best) { case (?(d, av)) custodyErr(#DepotShort({ depot = d; isin = r.isin; held = av; wanted = nominal })); case null custodyErr(#LotNotIn({ lot; state = "not held in a depot" })) }
+  };
+  /// The settlement of a substitution: the securities live in the pool, the cash comes back, the call credited
+  /// by the net the desk delivered.
+  public func planSubstitutionSettlement(s : State, js : JCore.State, journalCaller : Principal, now : Nat64, agreement : Text, id : Nat, authId : Text, postingDate : Nat, valueDate : Nat, period : Text, narration : Text) : Res<Plan> {
+    let p = switch (collateralPolicyOf(s)) { case (#err(e)) return #err(e); case (#ok(p)) p };
+    let a = switch (agreementRow(s, agreement)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+    let r = switch (CollateralCore.requireSecurities(s.collateral, agreement, id, #pledged)) { case (#err(e)) return collateralErr(e); case (#ok(r)) r };
+    let v = switch (poolSecuritiesValue(s, a, r.isin, r.nominal, valueDate)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+    let back = switch (poolCashValue(s, a, r.cashReturned, r.currency, valueDate)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+    let credit = if (v >= back) callCreditFor(s, a, true, v - back) else callCreditFor(s, a, false, back - v);
+    let c = CollateralCore.cashRow(s.collateral, agreement, r.currency);
+    if (valueDate < c.accrualFrom) return collateralErr(#InvalidMove({ reason = "a settlement is not dated before the last accrual" }));
+    let catchUp = if (r.cashReturned == 0) 0 else CollateralCore.interestTarget(a, c, valueDate) - c.interestAccrued;
+    let ev : CoT.Event = #substitutionSettled({ agreement; substitution = id; callCredit = credit; interestCatchUp = catchUp; day = valueDate });
+    let legs = CollateralCore.substitutionLegs(p, a, r, catchUp);
+    let extras = callMetAfter(s, a, credit, valueDate);
+    if (legs.size() == 0) return #ok({ event = ?#collateral(ev); extra = extras; journal = [] });
+    switch (postLegs(js, journalCaller, now, "collateral-substitution", [authId, agreement, Nat.toText(id), Nat.toText(valueDate)], legs, postingDate, valueDate, period, narration)) {
+      case (#err(e)) #err(e);
+      case (#ok(plan)) #ok({ event = ?#collateral(ev); extra = extras; journal = plan.journal });
+    }
+  };
+
+  // ─── the exposure of a counterparty's rows ──────────────────────────────────
+
+  /// What a treasury row contributes to its counterparty's exposure on a day, in the agreement's currency: a
+  /// funded placement's principal and accrued (a taking's the same, owed the other way), a derivative's mark;
+  /// nothing for a security, whose settlement is delivery versus payment.
+  func treasuryContribution(s : State, a : CollateralCore.AgreementRow, r : TreasuryCore.DealRow, day : Nat) : Res<?Int> {
+    if (not CollateralCore.covers(a, #treasury)) return #ok(null);
+    let placement = (r.flags & TreasuryCore.F_BUY) != 0;
+    switch (r.kind) {
+      case 1 {
+        if (not TreasuryCore.legSettled(r, 0) or TreasuryCore.legSettled(r, 1)) return #ok(?0);
+        let e : Int = (r.notional : Int) + r.accruedPosted;
+        some(convertSigned(s, if (placement) e else -e, r.currency, a.currency, day))
+      };
+      case (2 or 3 or 6) some(convertSigned(s, r.markPosted, r.secondCurrency, a.currency, day));
+      case 5 some(convertSigned(s, r.markPosted + r.accruedPosted, r.currency, a.currency, day));
+      case (_) #ok(?0);
+    }
+  };
+  func some(r : Res<Int>) : Res<?Int> { switch (r) { case (#ok(v)) #ok(?v); case (#err(e)) #err(e) } };
+  func callContribution(s : State, a : CollateralCore.AgreementRow, r : CallCore.Row, day : Nat) : Res<?Int> {
+    if (not CollateralCore.covers(a, #calls)) return #ok(null);
+    if ((r.flags & CallCore.F_FUNDED) == 0) return #ok(?0);
+    let e : Int = (r.balance : Int) + r.accruedPosted;
+    some(convertSigned(s, if ((r.flags & CallCore.F_PLACEMENT) != 0) e else -e, r.currency, a.currency, day))
+  };
+  /// A started repo: the cash lender's exposure less the collateral's value after the repo's own haircut, owed to
+  /// the desk on a reverse and by it on a repo.
+  func repoContribution(s : State, a : CollateralCore.AgreementRow, r : FinancingCore.RepoRow, day : Nat) : Res<?Int> {
+    if (not CollateralCore.covers(a, #repos)) return #ok(null);
+    if (r.state != #started) return #ok(?0);
+    let ?price = priceOf(s, r.isin, day) else return financingErr(#NoPrice({ isin = r.isin; day }));
+    let e : Int = (FinancingCore.exposure(r, day) : Int) - FinancingCore.collateralValue(r.nominal, price, r.haircutBps);
+    some(convertSigned(s, if (r.reverse) e else -e, r.currency, a.currency, day))
+  };
+  /// A started loan: the lent value and the fee due less the rebate and the collateral the desk holds.
+  func loanContribution(s : State, a : CollateralCore.AgreementRow, l : FinancingCore.LoanRow, day : Nat) : Res<?Int> {
+    if (not CollateralCore.covers(a, #loans)) return #ok(null);
+    if (l.state != #started and l.state != #recalled) return #ok(?0);
+    var e : Int = (FinancingCore.loanValue(l) : Int) + l.feePosted - l.rebatePosted - l.cashCollateral;
+    if (l.collateralNominal > 0) {
+      let ?price = priceOf(s, l.collateralIsin, day) else return financingErr(#NoPrice({ isin = l.collateralIsin; day }));
+      e -= TreasuryMath.cleanCost(l.collateralNominal, price);
+    };
+    some(convertSigned(s, e, l.currency, a.currency, day))
+  };
+  func contributionUnder(a : CollateralCore.AgreementRow, c : Int) : Int { if (a.netting or c > 0) c else 0 };
+
+  // ─── the risk sweep ─────────────────────────────────────────────────────────
+
+  public type SweepAdvance = { day : Nat; family : Text; visited : Nat; familyDone : Bool; published : Bool; blocks : [Nat]; postings : [Nat] };
+
+  /// One slice of the open sweep: the next bounded run of rows of the family in hand, each row's measure added
+  /// to the nodes it falls under and its contribution to its counterparty's agreement; the slice recorded with its
+  /// cursor so the next message resumes from the log. Past the last family, the publication: the utilisation per
+  /// node, then per agreement the exposure, the pool valued, the interest accrued, the standing call superseded
+  /// (an unmet one alerted first) and the day's call raised.
+  public func runRiskSweepSlice(s : State, _bb : Blocks, js : JCore.State, jb : JCore.Blocks, journalCaller : Principal, now : Nat64, recorder : Recorder) : Res<SweepAdvance> {
+    let ?w = s.limits.sweep else return limitErr(#NoSweep);
+    let acc = newAcc(recorder);
+    if (w.family > 3) return publishSweep(s, js, jb, journalCaller, now, acc, w);
+    let prepared = LimitCore.prepare(s.limits);
+    let under = isUnderBook(s);
+    let nodeSums = Map.empty<Text, Nat>();
+    let agSums = Map.empty<Text, (Int, Nat)>();
+    var firstError : ?T.Error = null;
+    func take(f : LimitCore.RowFacts, contribution : (CollateralCore.AgreementRow) -> Res<?Int>) {
+      for (n in LimitCore.nodesFor(s.limits, prepared, f, under).vals()) {
+        let cur = switch (Map.get(nodeSums, Text.compare, n)) { case (?v) v; case null 0 };
+        Map.add(nodeSums, Text.compare, n, cur + f.amount);
+      };
+      switch (CollateralCore.agreementOfCounterpartyHash(s.collateral, f.cpHash)) {
+        case (?a) {
+          switch (contribution(a)) {
+            case (#ok(?c)) { let (cs, cn) = switch (Map.get(agSums, Text.compare, a.id)) { case (?v) v; case null (0, 0) }; Map.add(agSums, Text.compare, a.id, (cs + contributionUnder(a, c), cn + 1)) };
+            case (#ok(null)) {};
+            case (#err(e)) { if (firstError == null) firstError := ?e };
+          };
+        };
+        case null {};
+      };
+    };
+    let family = LimitCore.familyOf(w.family);
+    let (lo, hi) = R.fullRange(8);
+    func idOf(k : Blob) : Nat { R.getNat(Blob.toArray(k), 0, 8) };
+    let step = switch (family) {
+      case (#treasury) Shard.stepRows(s.treasury.deals, lo, hi, w.cursor, w.sliceSize, func(k, _) {
+        let id = idOf(k); if (id >= w.bound) return;
+        switch (TreasuryCore.row(s.treasury, id)) { case (?r) { if (TreasuryCore.isOpen(r)) take(treasuryRowFacts(s, r, w.day), func(a) { treasuryContribution(s, a, r, w.day) }) }; case null {} };
+      });
+      case (#call) Shard.stepRows(s.calls.rows, lo, hi, w.cursor, w.sliceSize, func(k, _) {
+        let id = idOf(k); if (id >= w.bound) return;
+        switch (CallCore.row(s.calls, id)) { case (?r) { if (CallCore.isOpen(r)) take(callFacts(r.id, r.book, r.cpHash, r.currency, r.balance), func(a) { callContribution(s, a, r, w.day) }) }; case null {} };
+      });
+      case (#repo) Shard.stepRows(s.financing.repos, lo, hi, w.cursor, w.sliceSize, func(k, _) {
+        let id = idOf(k); if (id >= w.bound) return;
+        switch (FinancingCore.repo(s.financing, id)) { case (?r) { if (r.state != #closed) take(repoFacts(r.id, r.book, r.cpHash, r.currency, r.cash, r.maturity, w.day), func(a) { repoContribution(s, a, r, w.day) }) }; case null {} };
+      });
+      case (#loan) Shard.stepRows(s.financing.loans, lo, hi, w.cursor, w.sliceSize, func(k, _) {
+        let id = idOf(k); if (id >= w.bound) return;
+        switch (FinancingCore.loan(s.financing, id)) { case (?l) { if (l.state != #returned) take(loanFacts(l.id, l.book, l.cpHash, l.currency, FinancingCore.loanValue(l)), func(a) { loanContribution(s, a, l, w.day) }) }; case null {} };
+      });
+    };
+    switch (firstError) { case (?e) return #err(e); case null {} };
+    let nodes = Array.map<(Text, Nat), (Text, Nat)>(Map.toArray(nodeSums), func(x) { x });
+    let agreements = Array.map<(Text, (Int, Nat)), (Text, Int, Nat)>(Map.toArray(agSums), func((a, (c, n))) { (a, c, n) });
+    record(acc, #limits(#sweepSliced({ day = w.day; slice = w.slices; family; visited = step.visited; nextCursor = step.nextCursor; familyDone = step.completed; nodes; agreements })));
+    #ok({ day = w.day; family = LT.familyText(family); visited = step.visited; familyDone = step.completed; published = false; blocks = List.toArray(acc.blocks); postings = [] })
+  };
+  /// The publication: every figure is computed before any block is recorded, so a missing price or rate refuses
+  /// the publication whole and the sweep stays open to be published once the data is there.
+  func publishSweep(s : State, js : JCore.State, jb : JCore.Blocks, journalCaller : Principal, now : Nat64, acc : ChunkAcc, w : LimitCore.Sweep) : Res<SweepAdvance> {
+    let day = w.day;
+    let nodes = Array.map<LimitCore.NodeRow, (Text, Nat)>(LimitCore.liveNodes(s.limits), func(n) { (n.id, n.pending) });
+    let due = nextBusinessDay(js)(day + 1);
+    let period = periodForDay(js, day);
+    type Planned = { a : CollateralCore.AgreementRow; balance : Int; interest : [(CoT.Event, JT.PostingInput)] };
+    let planned = List.empty<Planned>();
+    for (a in CollateralCore.agreements(s.collateral).vals()) {
+      let balance = switch (poolBalance(s, a, day)) { case (#err(e)) return #err(e); case (#ok(b)) b };
+      let interest = List.empty<(CoT.Event, JT.PostingInput)>();
+      for (c in CollateralCore.cashOf(s.collateral, a.id).vals()) {
+        let delta = CollateralCore.interestTarget(a, c, day) - c.interestAccrued;
+        if (delta != 0) {
+          let ?p = CollateralCore.policy(s.collateral) else return collateralErr(#NoPolicy);
+          let ?per = period else return #err(#JournalError({ error = #UnknownPeriod({ period = "open period containing day " # Nat.toText(day) }) }));
+          let ev : CoT.Event = #interestAccrued({ agreement = a.id; currency = c.currency; interest = delta; day });
+          let legs = CollateralCore.legsOf(p, a, ev);
+          if (not Posting.balances(legs)) return limitErr(#InvalidSweep({ reason = "collateral interest " # a.id # " " # c.currency # ": the legs do not balance" }));
+          List.add(interest, (ev, { idempotencyKey = Posting.key("collateral-interest", [a.id, c.currency, Nat.toText(day)]); postingDate = day; valueDate = day; period = per; legs; sourceRef = { kind = "collateral-interest"; id = a.id # "/" # c.currency # "/" # Nat.toText(day) }; narration = "collateral interest " # a.id # " " # c.currency; correctionOf = null }));
+        };
+      };
+      List.add(planned, { a; balance; interest = List.toArray(interest) });
+    };
+    record(acc, #limits(#sweepPublished({ day; slices = w.slices; rows = w.rows; nodes })));
+    for (pl in List.values(planned)) {
+      let a0 = pl.a;
+      record(acc, #collateral(#exposureRecorded({ agreement = a0.id; day; exposure = a0.pendingExposure; balance = pl.balance; rows = a0.pendingRows })));
+      for ((ev, input) in pl.interest.vals()) {
+        switch (batchPost(js, jb, journalCaller, now, acc, input)) { case (?why) return limitErr(#InvalidSweep({ reason = "collateral interest " # a0.id # ": " # why })); case null {} };
+        record(acc, #collateral(ev));
+      };
+      // the standing call: alerted when unmet past its grace, then superseded by the day's figure
+      let a = switch (CollateralCore.agreement(s.collateral, a0.id)) { case (?x) x; case null a0 };
+      if (a.openCall != 0) {
+        switch (CollateralCore.call(s.collateral, a.openCall)) {
+          case (?c) {
+            if (c.state == CollateralCore.CALL_OPEN) {
+              if (day >= c.due + a.graceDays) {
+                switch (alertFor(s, { rule = "collateral.call.unmet"; version = 1; account = c.id; day; postings = []; detail = "agreement " # a.id # ": call " # Nat.toText(c.id) # " of " # Nat.toText(c.amount) # " due " # Nat.toText(c.due) # " unmet, " # Nat.toText(c.outstanding) # " outstanding" }, #endOfDay)) { case (?al) record(acc, al); case null {} };
+              };
+              record(acc, #collateral(#callSuperseded({ agreement = a.id; call = c.id; outstanding = c.outstanding; day })));
+            };
+          };
+          case null {};
+        };
+      };
+      switch (CollateralCore.callFor(a, a0.pendingExposure, pl.balance)) {
+        case (?(amount, deliver)) record(acc, #collateral(#callRaised({ agreement = a.id; id = s.height; amount; deliver; day; due })));
+        case null {};
+      };
+    };
+    #ok({ day; family = "done"; visited = 0; familyDone = true; published = true; blocks = List.toArray(acc.blocks); postings = List.toArray(acc.postings) })
   };
 
   /// The functional currency, the recorded spot rates and the position pairs of the close, the recorded fixings,
@@ -411,6 +794,10 @@ module {
       let plan = switch (i.family) {
         case (#repo) planRepoLeg(s, bb, js, journalCaller, now, i.deal, i.leg, "tachyon", day, day, period, "settled through Tachyon, trade " # Nat.toText(i.tradeId));
         case (#loan) planLoanLeg(s, bb, js, journalCaller, now, i.deal, i.leg, "tachyon", day, day, period, "settled through Tachyon, trade " # Nat.toText(i.tradeId));
+        case (#collateral) {
+          let ?r = CollateralCore.securitiesRow(s.collateral, i.deal) else return collateralErr(#UnknownPledge({ agreement = ""; id = i.deal }));
+          planSubstitutionSettlement(s, js, journalCaller, now, r.agreement, i.deal, "tachyon", day, day, period, "settled through Tachyon, trade " # Nat.toText(i.tradeId))
+        };
         case (#treasury) return financingErr(#InvalidTerms({ reason = "unreachable" }));
       };
       return switch (plan) {
@@ -554,6 +941,13 @@ module {
           };
           case (_) financingErr(#InvalidTerms({ reason = "a loan has a start leg and a return leg" }));
         }
+      };
+      case (#collateral) {
+        // a substitution: the desk delivers the securities against the cash it takes back, on the day's cycle
+        let ?r = CollateralCore.securitiesRow(s.collateral, id) else return collateralErr(#UnknownPledge({ agreement = ""; id }));
+        if (r.state != #pledged) return collateralErr(#PledgeNotIn({ id; state = CoT.securitiesStateText(r.state); wanted = "pledged" }));
+        if (leg != 0) return financingErr(#InvalidTerms({ reason = "a substitution has one leg" }));
+        #ok({ isin = r.isin; currency = r.currency; nominal = r.nominal; cash = r.cashReturned; deskDelivers = true; cycleDay = day })
       };
       case (#treasury) financingErr(#InvalidTerms({ reason = "a treasury deal is instructed by its own act" }));
     }
@@ -864,7 +1258,8 @@ module {
           case null { switch (JCore.getAccount(js, x.terms.cash.account)) { case null return #err(#UnknownAccount({ role = "call settlement"; account = x.terms.cash.account })); case (?_) {} } };
         };
         let extras = switch (combinedLimitEvents(s, x.book, x.counterparty, x.terms.currency, x.terms.principal, false, s.height, x.approver, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs };
-        #ok({ event = ?#call(#opened({ book = x.book; counterparty = x.counterparty; terms = x.terms; reference = x.reference; trader = authority; day = today; withinLimits = extras.size() == 0; approver = x.approver })); extra = extras; journal = [] })
+        let tree = switch (treeEventsOf(s, command, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs };
+        #ok({ event = ?#call(#opened({ book = x.book; counterparty = x.counterparty; terms = x.terms; reference = x.reference; trader = authority; day = today; withinLimits = extras.size() == 0; approver = x.approver })); extra = Array.concat<T.Event>(extras, tree); journal = [] })
       };
       case (#resetCallRate(x)) {
         let p = switch (policyOf(s)) { case (#err(e)) return #err(e); case (#ok(p)) p };
@@ -885,12 +1280,13 @@ module {
         let ?cs = cash else return callErr(#UnknownCall({ call = x.call }));
         // an addition counts towards the counterparty limit like an opening; a draw never breaches
         let extras = if (x.delta > 0) { switch (combinedLimitEvents(s, r.book, { party = null; name = cpName; bic = ""; lei = "" }, r.currency, Int.abs(x.delta), false, x.call, x.approver, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs } } else [];
+        let tree = switch (treeEventsOf(s, command, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs };
         switch (CallCore.planAdjust(s.calls, x.call, x.delta, x.valueDate)) {
           case (#err(e)) callErr(e);
           case (#ok(ev)) {
             switch (callPost(js, journalCaller, now, p, r, cs, ev, "call-adjust", [authId, Nat.toText(x.call), Nat.toText(x.valueDate)], x.postingDate, x.valueDate, x.period, x.narration)) {
               case (#err(e)) #err(e);
-              case (#ok(plan)) #ok({ plan with extra = Array.concat<T.Event>(plan.extra, extras) });
+              case (#ok(plan)) #ok({ plan with extra = Array.concat<T.Event>(Array.concat<T.Event>(plan.extra, extras), tree) });
             }
           };
         }
@@ -1028,7 +1424,8 @@ module {
         if (TreasuryCore.security(s.treasury, x.terms.collateral.isin) == null) return treasuryErr(#UnknownSecurity({ isin = x.terms.collateral.isin }));
         if (CustodyCore.depot(s.custody, x.terms.depot) == null) return custodyErr(#UnknownDepot({ depot = x.terms.depot }));
         switch (JCore.getAccount(js, x.terms.cashAccount.account)) { case null return #err(#UnknownAccount({ role = "repo cash"; account = x.terms.cashAccount.account })); case (?_) {} };
-        only(#financing(#repoOpened({ book = x.book; counterparty = x.counterparty; terms = x.terms; reference = x.reference; trader = authority; day = today })))
+        let tree = switch (treeEventsOf(s, command, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs };
+        #ok({ event = ?#financing(#repoOpened({ book = x.book; counterparty = x.counterparty; terms = x.terms; reference = x.reference; trader = authority; day = today })); extra = tree; journal = [] })
       };
       case (#settleRepoLeg(x)) {
         switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
@@ -1093,7 +1490,8 @@ module {
         if (TreasuryCore.security(s.treasury, x.terms.isin) == null) return treasuryErr(#UnknownSecurity({ isin = x.terms.isin }));
         if (CustodyCore.depot(s.custody, x.terms.depot) == null) return custodyErr(#UnknownDepot({ depot = x.terms.depot }));
         switch (JCore.getAccount(js, x.terms.cashAccount.account)) { case null return #err(#UnknownAccount({ role = "loan cash"; account = x.terms.cashAccount.account })); case (?_) {} };
-        only(#financing(#loanOpened({ book = x.book; counterparty = x.counterparty; terms = x.terms; reference = x.reference; trader = authority; day = today })))
+        let tree = switch (treeEventsOf(s, command, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs };
+        #ok({ event = ?#financing(#loanOpened({ book = x.book; counterparty = x.counterparty; terms = x.terms; reference = x.reference; trader = authority; day = today })); extra = tree; journal = [] })
       };
       case (#settleLoanLeg(x)) {
         switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
@@ -1234,6 +1632,94 @@ module {
           };
         }
       };
+      // ── collateral ──
+      case (#setCollateralPolicy(pol)) {
+        for (acct in CollateralCore.accountsOf(pol).vals()) { switch (requirePostableAccount(js, "collateral", acct)) { case (?e) return #err(e); case null {} } };
+        switch (CollateralCore.planPolicy(pol)) { case (#err(e)) collateralErr(e); case (#ok(ev)) only(#collateral(ev)) }
+      };
+      case (#setCollateralAgreement(x)) {
+        let ag = x.agreement;
+        if (JCore.currencyMinorUnits(js, ag.currency) == null) return collateralErr(#InvalidAgreement({ reason = "currency " # ag.currency # " is not registered in the journal" }));
+        switch (requirePostableAccount(js, "collateral cash", ag.cash.account)) { case (?e) return #err(e); case null {} };
+        switch (CollateralCore.planSetAgreement(s.collateral, ag, today)) { case (#err(e)) collateralErr(e); case (#ok(ev)) only(#collateral(ev)) }
+      };
+      case (#postCollateralCash(x)) {
+        let p = switch (collateralPolicyOf(s)) { case (#err(e)) return #err(e); case (#ok(p)) p };
+        let ag = switch (agreementRow(s, x.agreement)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        // cash the counterparty posts, or takes back of the desk's, meets a call on the counterparty; the reverse meets a call on the desk
+        let deskDelivers = switch (x.move) { case (#given or #receivedReturned) true; case (_) false };
+        let value = switch (poolCashValue(s, ag, x.amount, x.currency, x.valueDate)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        let credit = callCreditFor(s, ag, deskDelivers, value);
+        let ev = switch (CollateralCore.planCashMove(s.collateral, x.agreement, x.move, x.amount, x.currency, credit, x.valueDate)) { case (#err(e)) return collateralErr(e); case (#ok(e)) e };
+        collateralPost(s, js, journalCaller, now, p, ag, ev, "collateral-cash", [authId, x.agreement, CoT.cashMoveText(x.move), Nat.toText(x.valueDate)], x.postingDate, x.valueDate, x.period, x.narration, callMetAfter(s, ag, credit, x.valueDate))
+      };
+      case (#pledgeCollateral(x)) {
+        let ag = switch (agreementRow(s, x.agreement)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        let (lot, depot) = switch (pledgeableLot(s, x.lot, x.nominal)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        let value = switch (poolSecuritiesValue(s, ag, lot.isin, x.nominal, today)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        let credit = callCreditFor(s, ag, true, value);
+        let custody : [T.Event] = [#custody(#pledged({ lot = x.lot; depot; nominal = x.nominal; reference = "collateral/" # x.agreement; day = today }))];
+        #ok({ event = ?#collateral(#securitiesPledged({ agreement = x.agreement; id = s.height; lot = x.lot; isin = lot.isin; depot; nominal = x.nominal; callCredit = credit; day = today })); extra = Array.concat<T.Event>(custody, callMetAfter(s, ag, credit, today)); journal = [] })
+      };
+      case (#releaseCollateral(x)) {
+        let ag = switch (agreementRow(s, x.agreement)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        let r = switch (CollateralCore.requireSecurities(s.collateral, x.agreement, x.pledge, #live)) { case (#err(e)) return collateralErr(e); case (#ok(r)) r };
+        let ?lot = r.lot else return collateralErr(#PledgeNotIn({ id = x.pledge; state = "received"; wanted = "pledged by the desk" }));
+        let value = switch (poolSecuritiesValue(s, ag, r.isin, r.nominal, today)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        let credit = callCreditFor(s, ag, false, value);
+        let custody : [T.Event] = [#custody(#released({ lot; depot = r.depot; nominal = r.nominal; reference = "collateral/" # x.agreement; day = today }))];
+        #ok({ event = ?#collateral(#securitiesReleased({ agreement = x.agreement; pledge = x.pledge; callCredit = credit; day = today })); extra = Array.concat<T.Event>(custody, callMetAfter(s, ag, credit, today)); journal = [] })
+      };
+      case (#receiveCollateral(x)) {
+        let ag = switch (agreementRow(s, x.agreement)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        if (x.nominal == 0) return collateralErr(#InvalidMove({ reason = "a receipt is a positive nominal" }));
+        if (CustodyCore.depot(s.custody, x.depot) == null) return custodyErr(#UnknownDepot({ depot = x.depot }));
+        let value = switch (poolSecuritiesValue(s, ag, x.isin, x.nominal, today)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        let credit = callCreditFor(s, ag, false, value);
+        let custody : [T.Event] = [#custody(#collateralReceived({ isin = x.isin; depot = x.depot; nominal = x.nominal; reference = "collateral/" # x.agreement; day = today }))];
+        #ok({ event = ?#collateral(#securitiesReceived({ agreement = x.agreement; id = s.height; isin = x.isin; depot = x.depot; nominal = x.nominal; callCredit = credit; day = today })); extra = Array.concat<T.Event>(custody, callMetAfter(s, ag, credit, today)); journal = [] })
+      };
+      case (#returnCollateral(x)) {
+        let ag = switch (agreementRow(s, x.agreement)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        let r = switch (CollateralCore.requireSecurities(s.collateral, x.agreement, x.receipt, #live)) { case (#err(e)) return collateralErr(e); case (#ok(r)) r };
+        if (r.given) return collateralErr(#PledgeNotIn({ id = x.receipt; state = "pledged by the desk"; wanted = "received" }));
+        let value = switch (poolSecuritiesValue(s, ag, r.isin, r.nominal, today)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        let credit = callCreditFor(s, ag, true, value);
+        let custody : [T.Event] = [#custody(#collateralReturned({ isin = r.isin; depot = r.depot; nominal = r.nominal; reference = "collateral/" # x.agreement; day = today }))];
+        #ok({ event = ?#collateral(#securitiesReturned({ agreement = x.agreement; receipt = x.receipt; callCredit = credit; day = today })); extra = Array.concat<T.Event>(custody, callMetAfter(s, ag, credit, today)); journal = [] })
+      };
+      case (#openCollateralSubstitution(x)) {
+        let ag = switch (agreementRow(s, x.agreement)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        if (x.cashReturned == 0) return collateralErr(#InvalidMove({ reason = "a substitution returns cash; a delivery against nothing is a pledge" }));
+        if (Text.encodeUtf8(x.currency).size() != 3) return collateralErr(#InvalidMove({ reason = "a currency code has three letters" }));
+        let c = CollateralCore.cashRow(s.collateral, x.agreement, x.currency);
+        if (c.given < x.cashReturned) return collateralErr(#PoolShort({ agreement = x.agreement; currency = x.currency; held = c.given; wanted = x.cashReturned }));
+        let (lot, depot) = switch (pledgeableLot(s, x.lot, x.nominal)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        switch (poolSecuritiesValue(s, ag, lot.isin, x.nominal, today)) { case (#err(e)) return #err(e); case (#ok(_)) {} };
+        let custody : [T.Event] = [#custody(#pledged({ lot = x.lot; depot; nominal = x.nominal; reference = "collateral/" # x.agreement; day = today }))];
+        #ok({ event = ?#collateral(#substitutionOpened({ agreement = x.agreement; id = s.height; lot = x.lot; isin = lot.isin; depot; nominal = x.nominal; cashReturned = x.cashReturned; currency = x.currency; day = today })); extra = custody; journal = [] })
+      };
+      case (#settleCollateralSubstitution(x)) {
+        switch (SettlementCore.openInstructionOf(s.settlement, x.substitution, 0)) { case (?i) return settlementErr(#AlreadyInstructed({ deal = x.substitution; instruction = i.id })); case null {} };
+        planSubstitutionSettlement(s, js, journalCaller, now, x.agreement, x.substitution, authId, x.postingDate, x.valueDate, x.period, x.narration)
+      };
+      case (#settleCollateralInterest(x)) {
+        let p = switch (collateralPolicyOf(s)) { case (#err(e)) return #err(e); case (#ok(p)) p };
+        let ag = switch (agreementRow(s, x.agreement)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        let ev = switch (CollateralCore.planSettleInterest(s.collateral, x.agreement, x.currency, x.valueDate)) { case (#err(e)) return collateralErr(e); case (#ok(e)) e };
+        collateralPost(s, js, journalCaller, now, p, ag, ev, "collateral-interest-settled", [authId, x.agreement, x.currency, Nat.toText(x.valueDate)], x.postingDate, x.valueDate, x.period, x.narration, [])
+      };
+      // ── limits ──
+      case (#setLimitNode(x)) {
+        if (JCore.currencyMinorUnits(js, x.node.currency) == null) return limitErr(#InvalidNode({ reason = "currency " # x.node.currency # " is not registered in the journal" }));
+        switch (LimitCore.planSetNode(s.limits, x.node, isUnderBook(s), bookExists(s), today)) { case (#err(e)) limitErr(e); case (#ok(ev)) only(#limits(ev)) }
+      };
+      case (#removeLimitNode(x)) { switch (LimitCore.planRemoveNode(s.limits, x.node, today)) { case (#err(e)) limitErr(e); case (#ok(ev)) only(#limits(ev)) } };
+      case (#amendCounterparty(x)) { switch (LimitCore.planAmendCounterparty(s.limits, x.counterparty, today)) { case (#err(e)) limitErr(e); case (#ok(ev)) only(#limits(ev)) } };
+      case (#openRiskSweep(x)) {
+        for (r in Eod.listRuns(s.eod).vals()) { if (Eod.isOpen(r)) return limitErr(#RunOpen({ book = r.book; businessDate = r.businessDate })) };
+        switch (LimitCore.planOpenSweep(s.limits, today, s.height, x.sliceSize)) { case (#err(e)) limitErr(e); case (#ok(ev)) only(#limits(ev)) }
+      };
       // ── treasury: Manticore's planners with the desk's context ──
       case (#setTreasuryPolicy(pol)) {
         for (code in TreasuryCore.accountsOf(pol).vals()) { switch (JCore.getAccount(js, code)) { case null return #err(#UnknownAccount({ role = "treasury policy"; account = code })); case (?_) {} } };
@@ -1264,12 +1750,14 @@ module {
         let (dealCcy, dealAmount) : (Text, Nat) = switch (treasuryKindTotals(s, x.kind)) { case (xs) { if (xs.size() > 0) xs[0] else ("", 0) } };
         let treasuryOnly = switch (TreasuryCore.limitOf(s.treasury, x.book, #counterpartyExposure, dealCcy, x.counterparty.name)) { case (?l) treasuryExposure(s, x.book, x.counterparty.name, dealCcy) + dealAmount > l; case null false };
         let combined = if (dealAmount == 0) [] else { switch (combinedLimitEvents(s, x.book, x.counterparty, dealCcy, dealAmount, treasuryOnly, s.height, x.approver, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs } };
+        // the tree: what the deal adds under every node it falls under, and the breaches an approver accepted
+        let tree = switch (treeEventsOf(s, command, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs };
         // the trader is whose act it is; the approver on the command is the desk head who accepted a breach
         // a security deal is held in the book's depot when the book declares one
         let depotAssigned : [T.Event] = switch (x.kind, CustodyCore.bookDepotOf(s.custody, x.book)) { case (#security(_), ?d) [#custody(#dealDepotAssigned({ deal = s.height; depot = d; day = today }))]; case (_) [] };
         switch (TreasuryCore.planCapture(s.treasury, s.height, x.book, x.counterparty, x.kind, x.reference, authority, today, x.approver, ctx, treasuryTerms(bb))) {
           case (#err(e)) treasuryErr(e);
-          case (#ok(r)) #ok({ event = ?#treasury(r.ev); extra = Array.concat<T.Event>(Array.concat<T.Event>(Array.map<TT.TreasuryEvent, T.Event>(r.extras, func(e) { #treasury(e) }), combined), depotAssigned); journal = [] });
+          case (#ok(r)) #ok({ event = ?#treasury(r.ev); extra = Array.concat<T.Event>(Array.concat<T.Event>(Array.concat<T.Event>(Array.map<TT.TreasuryEvent, T.Event>(r.extras, func(e) { #treasury(e) }), combined), depotAssigned), tree); journal = [] });
         }
       };
       case (#confirmDeal(x)) {
@@ -1908,6 +2396,15 @@ module {
       case (#settlement(se)) SettlementCore.fold(s.settlement, block.index, se);
       case (#financing(fe)) FinancingCore.fold(s.financing, block.index, fe);
       case (#valuation(ve)) { HedgeCore.fold(s.hedges, block.index, ve); switch (ve) { case (#thetaRecorded(x)) Attribution.observeTheta(s.attribution, x.deal, x.day, x.theta); case (_) {} } };
+      case (#collateral(ce)) CollateralCore.fold(s.collateral, block.index, ce);
+      case (#limits(le)) {
+        LimitCore.fold(s.limits, block.index, le);
+        switch (le) {
+          case (#sweepSliced(x)) { for ((ag, c, n) in x.agreements.vals()) CollateralCore.accumulate(s.collateral, ag, c, n) };
+          case (#sweepOpened(_)) CollateralCore.resetPending(s.collateral);
+          case (_) {};
+        };
+      };
       case (_) Auth.apply(s.authority, block);
     };
     if (block.index + 1 > s.height) s.height := block.index + 1;
@@ -1986,24 +2483,73 @@ module {
     FinancingCore.fingerprintInto(w, s.financing);
     HedgeCore.fingerprintInto(w, s.hedges);
     Attribution.fingerprintInto(w, s.attribution);
+    CollateralCore.fingerprintInto(w, s.collateral);
+    LimitCore.fingerprintInto(w, s.limits);
   };
   public func fingerprint(s : State) : Blob { let w = JC.Writer(); fingerprintInto(w, s); KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob()) };
-  /// The fingerprint by section, so a divergence between the live state and a fresh fold names the sub-state.
+  /// The sections of the state, each fingerprinted on its own so a divergence between the live state and a fresh
+  /// fold names the sub-state, and so a state too large to digest whole in one message is compared a section at
+  /// a time.
+  public func sectionNames() : [Text] { ["authority", "close", "fixings", "alerts", "eod", "treasury", "calls", "custody", "settlement", "financing", "hedges", "attribution", "collateral", "limits"] };
+  public func fingerprintSection(s : State, name : Text) : ?Blob {
+    let w = JC.Writer();
+    switch (name) {
+      case "authority" Auth.fingerprintInto(w, s.authority);
+      case "close" CloseCore.fingerprintInto(w, s.close);
+      case "fixings" Fixings.fingerprintInto(w, s.fixings);
+      case "alerts" AlertCore.fingerprintInto(w, s.alerts);
+      case "eod" Eod.fingerprintInto(w, s.eod);
+      case "treasury" TreasuryCore.fingerprintInto(w, s.treasury);
+      case "calls" CallCore.fingerprintInto(w, s.calls);
+      case "custody" CustodyCore.fingerprintInto(w, s.custody);
+      case "settlement" SettlementCore.fingerprintInto(w, s.settlement);
+      case "financing" FinancingCore.fingerprintInto(w, s.financing);
+      case "hedges" HedgeCore.fingerprintInto(w, s.hedges);
+      case "attribution" Attribution.fingerprintInto(w, s.attribution);
+      case "collateral" CollateralCore.fingerprintInto(w, s.collateral);
+      case "limits" LimitCore.fingerprintInto(w, s.limits);
+      case (_) return null;
+    };
+    ?KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob())
+  };
   public func fingerprintSections(s : State) : [(Text, Blob)] {
-    func one(name : Text, write : JC.Writer -> ()) : (Text, Blob) { let w = JC.Writer(); write(w); (name, KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob())) };
+    Array.map<Text, (Text, Blob)>(sectionNames(), func(n) { (n, switch (fingerprintSection(s, n)) { case (?b) b; case null Blob.fromArray([]) }) })
+  };
+
+  /// The row indexes of the state, named, for a comparison in bounded messages: a state too large to digest in
+  /// one message is compared index by index and page by page, the scalar figures of every core beside them.
+  public func digestIndexes(s : State) : [(Text, RI.State)] {
+    let t = s.treasury; let c = s.calls; let cu = s.custody; let se = s.settlement; let f = s.financing; let co = s.collateral; let l = s.limits;
     [
-      one("authority", func(w) { Auth.fingerprintInto(w, s.authority) }),
-      one("close", func(w) { CloseCore.fingerprintInto(w, s.close) }),
-      one("fixings", func(w) { Fixings.fingerprintInto(w, s.fixings) }),
-      one("alerts", func(w) { AlertCore.fingerprintInto(w, s.alerts) }),
-      one("eod", func(w) { Eod.fingerprintInto(w, s.eod) }),
-      one("treasury", func(w) { TreasuryCore.fingerprintInto(w, s.treasury) }),
-      one("calls", func(w) { CallCore.fingerprintInto(w, s.calls) }),
-      one("custody", func(w) { CustodyCore.fingerprintInto(w, s.custody) }),
-      one("settlement", func(w) { SettlementCore.fingerprintInto(w, s.settlement) }),
-      one("financing", func(w) { FinancingCore.fingerprintInto(w, s.financing) }),
-      one("hedges", func(w) { HedgeCore.fingerprintInto(w, s.hedges) }),
-      one("attribution", func(w) { Attribution.fingerprintInto(w, s.attribution) }),
+      ("treasury.deals", t.deals), ("treasury.securities", t.securities), ("treasury.curves", t.curves), ("treasury.limits", t.limits), ("treasury.buckets", t.buckets),
+      ("treasury.nostros", t.nostros), ("treasury.nostroByAccount", t.nostroByAccount), ("treasury.nostroLegs", t.nostroLegs), ("treasury.legByPosting", t.legByPosting), ("treasury.statements", t.statements),
+      ("treasury.breaks", t.breaks), ("treasury.byBook", t.byBook), ("treasury.byState", t.byState), ("treasury.byCounterparty", t.byCounterparty), ("treasury.byIsin", t.byIsin), ("treasury.breaksByStatus", t.breaksByStatus), ("treasury.subledgers", t.subledgers),
+      ("calls.rows", c.rows), ("calls.byBook", c.byBook), ("calls.byState", c.byState), ("calls.byCounterparty", c.byCounterparty),
+      ("custody.instruments", cu.instruments), ("custody.depots", cu.depots), ("custody.depotByHash", cu.depotByHash), ("custody.bookDepot", cu.bookDepot), ("custody.dealDepot", cu.dealDepot), ("custody.holdings", cu.holdings),
+      ("custody.byDepotIsin", cu.byDepotIsin), ("custody.actions", cu.actions), ("custody.actionsByIsin", cu.actionsByIsin), ("custody.actionsByState", cu.actionsByState), ("custody.entitlements", cu.entitlements), ("custody.encumbered", cu.encumbered), ("custody.received", cu.received),
+      ("settlement.instructions", se.instructions), ("settlement.byDeal", se.byDeal), ("settlement.byCycle", se.byCycle), ("settlement.byState", se.byState), ("settlement.cycles", se.cycles), ("settlement.ledgers", se.ledgers),
+      ("financing.repos", f.repos), ("financing.loans", f.loans), ("financing.reposByBook", f.reposByBook), ("financing.loansByBook", f.loansByBook), ("financing.loansByLot", f.loansByLot), ("financing.reposByLot", f.reposByLot),
+      ("hedges.rows", s.hedges.rows), ("attribution.rows", s.attribution.rows), ("attribution.captureDay", s.attribution.captureDay),
+      ("collateral.agreements", co.agreements), ("collateral.byCounterparty", co.byCounterparty), ("collateral.haircuts", co.haircuts), ("collateral.cash", co.cash), ("collateral.securities", co.securities), ("collateral.securitiesByAgreement", co.securitiesByAgreement), ("collateral.calls", co.calls), ("collateral.callsByAgreement", co.callsByAgreement),
+      ("limits.nodes", l.nodes), ("limits.counters", l.counters), ("limits.counterparties", l.counterparties),
+    ]
+  };
+  /// One page of an index digested: the entries from the cursor, at most `limit` of them, hashed with their keys.
+  public func digestPage(index : RI.State, cursor : ?Blob, limit : Nat) : { hash : Blob; entries : Nat; next : ?Blob } {
+    let (lo, hi) = R.fullRange(index.spec.keyBytes);
+    let page = RI.range(index, lo, hi, cursor, Nat.max(1, Nat.min(limit, 2048)));
+    let w = JC.Writer();
+    for ((k, v) in page.entries.vals()) { w.blob(k); w.blob(v) };
+    w.nat(page.entries.size());
+    { hash = KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob()); entries = page.entries.size(); next = page.cursor }
+  };
+  /// The scalar figures of every core whose rows the digest walks, as text, so the two states compare whole.
+  public func digestScalars(s : State) : [(Text, Text)] {
+    [
+      ("treasury", debug_show (TreasuryCore.status(s.treasury))), ("calls", debug_show (CallCore.status(s.calls))), ("custody", debug_show (CustodyCore.status(s.custody))),
+      ("settlement", debug_show (SettlementCore.status(s.settlement))), ("financing", debug_show (FinancingCore.status(s.financing))),
+      ("hedges", debug_show ((s.hedges.policy, s.hedges.count, s.hedges.open, s.hedges.quotes, s.hedges.thetas))), ("attribution", debug_show (s.attribution.rowCount)),
+      ("collateral", debug_show ((CollateralCore.status(s.collateral), CollateralCore.policy(s.collateral)))), ("limits", debug_show ((LimitCore.status(s.limits), LimitCore.sweepView(s.limits)))),
     ]
   };
 

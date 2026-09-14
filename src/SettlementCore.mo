@@ -49,8 +49,8 @@ module {
   func getPrincipal(a : [Nat8], off : Nat) : Principal { let n = R.getNat(a, off, 1); Principal.fromBlob(Blob.fromArray(Array.tabulate<Nat8>(n, func(i) { a[off + 1 + i] }))) };
   func stateCode(s : ST.InstructionState) : Nat8 { switch (s) { case (#instructed) 1; case (#opened) 2; case (#verified) 3; case (#funded) 4; case (#settled) 5; case (#failed) 6; case (#boughtIn) 7; case (#cancelled) 8 } };
   func stateOf(b : Nat8) : ST.InstructionState { switch (b) { case 1 #instructed; case 2 #opened; case 3 #verified; case 4 #funded; case 5 #settled; case 6 #failed; case 7 #boughtIn; case _ #cancelled } };
-  public func familyCode(f : ST.Family) : Nat8 { switch (f) { case (#treasury) 0; case (#repo) 1; case (#loan) 2 } };
-  public func familyOf(c : Nat8) : ST.Family { switch (c) { case 1 #repo; case 2 #loan; case _ #treasury } };
+  public func familyCode(f : ST.Family) : Nat8 { switch (f) { case (#treasury) 0; case (#repo) 1; case (#loan) 2; case (#collateral) 3 } };
+  public func familyOf(c : Nat8) : ST.Family { switch (c) { case 1 #repo; case 2 #loan; case 3 #collateral; case _ #treasury } };
   public func hash8(t : Text) : Nat { R.getNat(Blob.toArray(Sha256.fromBlob(#sha256, Text.encodeUtf8(t))), 0, 8) };
 
   func encodeInstruction(r : InstructionRow) : Blob {
