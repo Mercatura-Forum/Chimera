@@ -1,0 +1,6 @@
+[submodule "vendor/tachyon"]
+	path = vendor/tachyon
+	url = https://github.com/Mercatura-Forum/Tachyon.git
+[submodule "vendor/manticore"]
+	path = vendor/manticore
+	url = https://github.com/Mercatura-Forum/Manticore.git

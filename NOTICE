@@ -1,0 +1,6 @@
+Chimera
+Copyright 2026 Mercatura Forum contributors (Thebes Core Team)
+
+This repository is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It depends on the Thebes kernel, Manticore and Tachyon, pinned under vendor/ at the commits recorded there; each carries its own LICENSE and NOTICE.
