@@ -4,7 +4,7 @@
 # ignored); schemas.json is the handoff: file, bytes, SHA-256, source URL. A copy already present locally is
 # accepted when its checksum matches.
 #
-# Provenance: Manticore tools/iso20022/fetch_schemas.sh at 9c0c30e, over the three schemas the desk validates.
+# Provenance: Manticore tools/iso20022/fetch_schemas.sh at 9c0c30e, over the five schemas the desk validates.
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$HERE/schemas"

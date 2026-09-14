@@ -8,6 +8,16 @@ import Freeze "mo:kernel/domain/Freeze";
 module {
   public func vectors() : [Freeze.Vector] {
     [
+      { family = "setSettlementVenue"; version = 1; hex = "3571e8618edaa05d2e7e21f490513d30ab886b8f3796a554219b21426d3d4836" },
+      { family = "setSettlementLedger"; version = 1; hex = "b4ca72e34b8573c48c24b032b06066f595fda841e90a80ca3172bf3da9915237" },
+      { family = "openSettlementCycle"; version = 1; hex = "e0bbe9ea1ace303db40fc71164fe41c3c218e8636fdce292aef1a89619f6bc64" },
+      { family = "instructSettlement"; version = 1; hex = "9b935aabde2e375c32eb0ba102fc7caadfe8691766d0b88ad8052ac033aa58f6" },
+      { family = "setInstructionTrade"; version = 1; hex = "f82b1c65697eda38360b9504654312067998f52beff69cc82235b2c94e6edfc5" },
+      { family = "recycleSettlement"; version = 1; hex = "719b11a5457b0b6bf2218e60280052bcc4f30a4832da7f0ab1e394d743cfc54e" },
+      { family = "recordSettlementStatus"; version = 1; hex = "356c66292bb7e352eeb1164060d8ce2bb7cb7286d5770c808f7d28d946633ab9" },
+      { family = "buyIn"; version = 1; hex = "fb67ee1b4af1537945044680c07e0dd3bd622417560212b1dc3c602d3e3fb784" },
+      { family = "cancelSettlement"; version = 1; hex = "3103ee5adbabaac3ba5ccb012e4338a4438d27e89c0455815ae7748534dfc01c" },
+      { family = "splitDeal"; version = 1; hex = "2f732f55559ca794fea414a77a463bd4610512303ce3d9237d5a5f5223dae420" },
       { family = "setCustodyPolicy"; version = 1; hex = "47aea7439affd69f53e4695db5dd0f1aaa6e00dc401da0db3cd36a72e8c8f53e" },
       { family = "extendInstrument"; version = 1; hex = "427c97507f3b49d58974435522b43107c24c5b8c7f2541106f59de4b8f8048c3" },
       { family = "openDepot"; version = 1; hex = "847fcb78857beb67f94cf24860f880f5f5a92ad1ff49c4808d523a34084b1764" },

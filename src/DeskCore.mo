@@ -33,6 +33,7 @@ import RI "mo:kernel/index/RegionIndex";
 
 import TT "mo:manticore/TreasuryTypes";
 import TreasuryCore "mo:manticore/TreasuryCore";
+import TreasuryMath "mo:manticore/TreasuryMath";
 import TreasuryMessages "mo:manticore/TreasuryMessages";
 import CloseCore "mo:manticore/CloseCore";
 import Fx "mo:manticore/Fx";
@@ -51,6 +52,11 @@ import CallT "CallTypes";
 import CallCore "CallCore";
 import CuT "CustodyTypes";
 import CustodyCore "CustodyCore";
+import ST "SettlementTypes";
+import SettlementCore "SettlementCore";
+import SettlementMessages "SettlementMessages";
+import DT "mo:tachyon/DvpTypes";
+import Sha256 "mo:sha2/Sha256";
 import Calendar "mo:journal/Calendar";
 
 module {
@@ -69,6 +75,7 @@ module {
     treasury : TreasuryCore.State;
     calls : CallCore.State;
     custody : CustodyCore.State;
+    settlement : SettlementCore.State;
   };
 
   public func newState(installer : Principal) : State { newStateIn(installer, RI.newArena()) };
@@ -84,6 +91,7 @@ module {
       treasury = TreasuryCore.newState(arena);
       calls = CallCore.newState(arena);
       custody = CustodyCore.newState(arena);
+      settlement = SettlementCore.newState(arena);
     }
   };
 
@@ -125,6 +133,7 @@ module {
       case (#adjustCallBalance(x)) ?x.postingDate;
       case (#settleCall(x)) ?x.postingDate;
       case (#processCorporateAction(x)) ?x.postingDate;
+      case (#buyIn(x)) ?x.postingDate;
       case (_) null;
     }
   };
@@ -149,9 +158,14 @@ module {
       case (#setBookDepot(x)) ?x.book;
       case (#assignDealDepot(x)) bookOfDeal(s, x.deal);
       case (#transferDepot(x)) bookOfDeal(s, x.lot);
+      case (#instructSettlement(x)) bookOfDeal(s, x.deal);
+      case (#splitDeal(x)) bookOfDeal(s, x.deal);
+      case (#buyIn(x)) bookOfInstruction(s, x.instruction);
+      case (#cancelSettlement(x)) bookOfInstruction(s, x.instruction);
       case (_) null;
     }
   };
+  func bookOfInstruction(s : State, id : Nat) : ?T.BookId { switch (SettlementCore.instruction(s.settlement, id)) { case (?i) bookOfDeal(s, i.deal); case null null } };
   func bookOfCall(s : State, call : Nat) : ?T.BookId { switch (CallCore.row(s.calls, call)) { case (?r) ?r.book; case null null } };
   func balanceOfCall(s : State, call : Nat) : [(Text, Nat)] { switch (CallCore.row(s.calls, call)) { case (?r) [(r.currency, r.balance)]; case null [] } };
   func bookOfDeal(s : State, deal : Nat) : ?T.BookId { switch (TreasuryCore.row(s.treasury, deal)) { case (?r) ?r.book; case null null } };
@@ -183,6 +197,10 @@ module {
       case (#resetCallRate(x)) balanceOfCall(s, x.call);
       case (#settleCall(x)) balanceOfCall(s, x.call);
       case (#transferDepot(x)) { switch (TreasuryCore.row(s.treasury, x.lot)) { case (?r) [(treasuryRowCurrency(s, r), x.nominal)]; case null [] } };
+      case (#instructSettlement(x)) notionalOfDeal(s, x.deal);
+      case (#splitDeal(x)) notionalOfDeal(s, x.deal);
+      case (#buyIn(x)) { switch (SettlementCore.instruction(s.settlement, x.instruction)) { case (?i) notionalOfDeal(s, i.deal); case null [] } };
+      case (#cancelSettlement(x)) { switch (SettlementCore.instruction(s.settlement, x.instruction)) { case (?i) notionalOfDeal(s, i.deal); case null [] } };
       case (_) [];
     }
   };
@@ -308,6 +326,45 @@ module {
     }
   };
 
+  func settlementErr<X>(e : ST.Error) : Res<X> { #err(#SettlementError({ error = e })) };
+  func settlementPlan(r : Result.Result<ST.Event, ST.Error>) : Res<Plan> { switch (r) { case (#err(e)) settlementErr(e); case (#ok(ev)) only(#settlement(ev)) } };
+  func instructionRow(s : State, id : Nat) : Res<SettlementCore.InstructionRow> { switch (SettlementCore.instruction(s.settlement, id)) { case (?i) #ok(i); case null settlementErr(#UnknownInstruction({ instruction = id })) } };
+  /// The settlement amount of a security deal's delivery leg and its sese.023, as the desk renders it: the clean
+  /// cost and the coupon accrued to the settlement date, the safekeeping account of the deal's depot.
+  public func instructionDocument(s : State, js : JCore.State, bb : Blocks, r : TreasuryCore.DealRow, t : TT.SecurityTrade) : Res<(Nat, Text)> {
+    let ?sec = TreasuryCore.security(s.treasury, t.isin) else return treasuryErr(#UnknownSecurity({ isin = t.isin }));
+    let ?minor = minorUnitsOf(js, sec.currency) else return #err(#MissingRate({ currency = sec.currency; asOf = t.settlement }));
+    let terms : TT.SecurityTerms = { isin = sec.isin; issuer = sec.issuer; currency = sec.currency; couponBps = sec.couponBps; couponsPerYear = sec.couponsPerYear; dayCount = TreasuryCore.conventionOf(sec); issue = sec.issue; maturity = sec.maturity };
+    let accrued = TreasuryMath.accruedCoupon(t.nominal, sec.couponBps, terms.dayCount, TreasuryCore.couponPeriodsOf(sec, t.nominal), t.settlement);
+    let amount = r.secondAmount + Int.abs(accrued);
+    let (_, reference) = treasuryCaptureOf(bb, r.id);
+    #ok((amount, TreasuryMessages.sese023Xml(reference, t, terms, amount, minor, safekeepingAccountOf(s, r.id), r.day)))
+  };
+  public func safekeepingAccountOf(s : State, deal : Nat) : Text {
+    switch (CustodyCore.dealDepotOf(s.custody, deal)) { case (?d) { switch (CustodyCore.depot(s.custody, d)) { case (?row) row.safekeepingAccount; case null d } }; case null "" }
+  };
+  /// The settlement of an instructed leg from Tachyon's verified receipt: the receipt and the settlement recorded,
+  /// then Manticore's leg settlement with its postings, in one act.
+  public func planReceiptSettlement(s : State, bb : Blocks, js : JCore.State, journalCaller : Principal, now : Nat64, i : SettlementCore.InstructionRow, receipt : SettlementCore.Receipt, day : Nat) : Res<Plan> {
+    let r = switch (treasuryRow(s, i.deal)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+    switch (requireNoOpenRun(s, r.book, day)) { case (?e) return #err(e); case null {} };
+    let kind = switch (treasuryKind(bb, r)) { case (#err(e)) return #err(e); case (#ok(k)) k };
+    let ctx = switch (treasuryCtx(s)) { case (#err(e)) return #err(e); case (#ok(c)) c };
+    let ?period = periodForDay(js, day) else return #err(#JournalError({ error = #UnknownPeriod({ period = "open period containing day " # Nat.toText(day) }) }));
+    switch (saleDepotCheck(s, r, kind, i.leg)) { case (?e) return #err(e); case null {} };
+    let act = switch (TreasuryCore.planSettleLeg(s.treasury, r, kind, i.leg, day, ctx)) { case (#err(e)) return treasuryErr(e); case (#ok(a)) a };
+    let head : [T.Event] = [
+      #settlement(#receiptVerified({ instruction = i.id; tradeId = i.tradeId; seq = receipt.seq; leaf = receipt.leaf; root = receipt.root; assetPaid = receipt.assetPaid; cashPaid = receipt.cashPaid; day })),
+      #settlement(#settled({ instruction = i.id; tradeId = i.tradeId; day })),
+    ];
+    switch (treasuryPost(js, journalCaller, now, "treasury-settle", ["tachyon", Nat.toText(i.id), Nat.toText(i.leg)], act, day, day, period, "settled through Tachyon, trade " # Nat.toText(i.tradeId))) {
+      case (#err(e)) #err(e);
+      case (#ok(plan)) {
+        let ev = switch (plan.event) { case (?e) [e]; case null [] };
+        #ok({ event = ?head[0]; extra = Array.concat<T.Event>(Array.concat<T.Event>([head[1]], ev), plan.extra); journal = plan.journal })
+      };
+    }
+  };
   func custodyErr<X>(e : CuT.Error) : Res<X> { #err(#CustodyError({ error = e })) };
   func custodyPlan(r : Result.Result<CuT.Event, CuT.Error>) : Res<Plan> { switch (r) { case (#err(e)) custodyErr(e); case (#ok(ev)) only(#custody(ev)) } };
   func isinOfLot(s : State) : TT.DealId -> Text { func(lot : Nat) : Text { switch (TreasuryCore.row(s.treasury, lot)) { case (?r) r.isin; case null "" } } };
@@ -633,6 +690,125 @@ module {
       case (#transferDepot(x)) custodyPlan(CustodyCore.planTransfer(s.custody, x.lot, x.from, x.to, x.nominal, x.reference, today));
       case (#announceCorporateAction(x)) custodyPlan(CustodyCore.planAnnounce(s.custody, s.treasury, x.announcement, today));
       case (#cancelCorporateAction(x)) custodyPlan(CustodyCore.planCancel(s.custody, x.action, x.reason, today));
+      // ── settlement through Tachyon ──
+      case (#setSettlementVenue(x)) {
+        switch (JCore.getAccount(js, x.venue.claimsAccount)) { case null return #err(#UnknownAccount({ role = "settlement claims"; account = x.venue.claimsAccount })); case (?_) {} };
+        settlementPlan(SettlementCore.planVenue(x.venue))
+      };
+      case (#setSettlementLedger(x)) settlementPlan(SettlementCore.planLedger(x.declaration));
+      case (#openSettlementCycle(x)) settlementPlan(SettlementCore.planOpenCycle(s.settlement, x.cycle, today));
+      case (#instructSettlement(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        let r = switch (treasuryRow(s, x.deal)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        let kind = switch (treasuryKind(bb, r)) { case (#err(e)) return #err(e); case (#ok(k)) k };
+        let #security(t) = kind else return settlementErr(#DealNotSettleable({ deal = x.deal; reason = "not a security" }));
+        let (amount, document) = switch (instructionDocument(s, js, bb, r, t)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        settlementPlan(SettlementCore.planInstruct(s.settlement, s.treasury, r, t, amount, x.counterparty, x.tradeId, x.reference, Sha256.fromBlob(#sha256, Text.encodeUtf8(document)), today))
+      };
+      case (#setInstructionTrade(x)) {
+        let i = switch (instructionRow(s, x.instruction)) { case (#err(e)) return #err(e); case (#ok(i)) i };
+        if (i.role != #taker) return settlementErr(#InvalidTerms({ reason = "a sale's trade is the desk's own opening" }));
+        if (i.state != #instructed) return settlementErr(#InstructionNotIn({ instruction = i.id; state = ST.stateText(i.state); wanted = "instructed" }));
+        if (i.escrowed) return settlementErr(#InstructionNotIn({ instruction = i.id; state = "escrowed on trade " # Nat.toText(i.tradeId); wanted = "reclaimed" }));
+        if (x.tradeId == 0) return settlementErr(#InvalidTerms({ reason = "a trade id is positive" }));
+        only(#settlement(#tradeAssigned({ instruction = i.id; tradeId = x.tradeId; day = today })))
+      };
+      case (#recycleSettlement(x)) {
+        let i = switch (instructionRow(s, x.instruction)) { case (#err(e)) return #err(e); case (#ok(i)) i };
+        if (i.state != #failed) return settlementErr(#InstructionNotIn({ instruction = i.id; state = ST.stateText(i.state); wanted = "failed" }));
+        if (x.cycle < today) return settlementErr(#InvalidTerms({ reason = "an instruction is recycled into a cycle on or after the day" }));
+        switch (SettlementCore.cycle(s.settlement, x.cycle)) { case (?c) { if (c.state != #open) return settlementErr(#NoCycle({ businessDate = x.cycle })) }; case null return settlementErr(#NoCycle({ businessDate = x.cycle })) };
+        only(#settlement(#recycled({ instruction = i.id; cycle = x.cycle; fails = i.fails; day = today })))
+      };
+      case (#recordSettlementStatus(x)) {
+        let i = switch (instructionRow(s, x.instruction)) { case (#err(e)) return #err(e); case (#ok(i)) i };
+        let r = switch (treasuryRow(s, i.deal)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        let ?sec = TreasuryCore.security(s.treasury, r.isin) else return treasuryErr(#UnknownSecurity({ isin = r.isin }));
+        let ?minor = minorUnitsOf(js, sec.currency) else return #err(#MissingRate({ currency = sec.currency; asOf = today }));
+        let (_, reference) = treasuryCaptureOf(bb, i.deal);
+        switch (SettlementMessages.parseSese024(x.document, minor)) {
+          case (#err(reason)) settlementErr(#InvalidTerms({ reason = "sese.024: " # reason }));
+          case (#ok(inc)) {
+            let matched = Text.equal(inc.reference, reference) and inc.quantity == i.assetAmount and (inc.amount == 0 or inc.amount == i.cashAmount) and (inc.isin.size() == 0 or Text.equal(inc.isin, r.isin))
+              and (switch (inc.tradeId) { case (?t) t == i.tradeId; case null true });
+            only(#settlement(#statusReceived({ instruction = i.id; status = inc.status; quantity = inc.quantity; amount = inc.amount; matched; documentHash = Sha256.fromBlob(#sha256, x.document); day = today })))
+          };
+        }
+      };
+      case (#cancelSettlement(x)) {
+        let i = switch (instructionRow(s, x.instruction)) { case (#err(e)) return #err(e); case (#ok(i)) i };
+        switch (i.state) { case (#settled or #boughtIn or #cancelled) return settlementErr(#InstructionNotIn({ instruction = i.id; state = ST.stateText(i.state); wanted = "open" })); case (_) {} };
+        if (i.escrowed) return settlementErr(#InstructionNotIn({ instruction = i.id; state = "escrowed on trade " # Nat.toText(i.tradeId); wanted = "reclaimed" }));
+        if (x.ourConsent.size() != 32 or x.theirConsent.size() != 32) return settlementErr(#InvalidTerms({ reason = "each party's consent is a sha256" }));
+        // the deal itself is cancelled with the settlement: both parties agreed not to settle it
+        switch (TreasuryCore.planCancel(s.treasury, i.deal, "settlement cancelled by consent: " # x.reason, today)) {
+          case (#err(e)) treasuryErr(e);
+          case (#ok(te)) #ok({ event = ?#settlement(#cancelled({ instruction = i.id; ourConsent = x.ourConsent; theirConsent = x.theirConsent; reason = x.reason; day = today })); extra = [#treasury(te)]; journal = [] });
+        }
+      };
+      case (#buyIn(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        let ?venue = SettlementCore.venue(s.settlement) else return settlementErr(#NoVenue);
+        let i = switch (instructionRow(s, x.instruction)) { case (#err(e)) return #err(e); case (#ok(i)) i };
+        if (i.state != #failed) return settlementErr(#InstructionNotIn({ instruction = i.id; state = ST.stateText(i.state); wanted = "failed" }));
+        if (i.role != #taker) return settlementErr(#InvalidTerms({ reason = "a buy-in replaces a purchase the counterparty failed to deliver" }));
+        if (i.escrowed) return settlementErr(#InstructionNotIn({ instruction = i.id; state = "escrowed on trade " # Nat.toText(i.tradeId); wanted = "reclaimed" }));
+        let r = switch (treasuryRow(s, i.deal)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        let kind = switch (treasuryKind(bb, r)) { case (#err(e)) return #err(e); case (#ok(k)) k };
+        let #security(t) = kind else return settlementErr(#DealNotSettleable({ deal = i.deal; reason = "not a security" }));
+        let ?sec = TreasuryCore.security(s.treasury, t.isin) else return treasuryErr(#UnknownSecurity({ isin = t.isin }));
+        let ctx = switch (treasuryCtx(s)) { case (#err(e)) return #err(e); case (#ok(c)) c };
+        let te = switch (TreasuryCore.planCancel(s.treasury, i.deal, "bought in after a settlement fail", today)) { case (#err(e)) return treasuryErr(e); case (#ok(e)) e };
+        // the replacement purchase, at the new price and date, with the original's trader; captured at the block after the cancellation
+        let replacementId = s.height + 2;
+        let trader = switch (bb.get(i.deal)) { case (?b) { switch (b.event) { case (#treasury(#dealCaptured(c))) c.trader; case (_) authority } }; case null authority };
+        let terms : TT.SecurityTrade = { t with priceMicro = x.priceMicro; settlement = x.settlement };
+        let cap = switch (TreasuryCore.planCapture(s.treasury, replacementId, r.book, x.counterparty, #security(terms), x.reference, trader, today, ?authority, ctx, treasuryTerms(bb))) { case (#err(e)) return treasuryErr(e); case (#ok(c)) c };
+        // the claim on the failing counterparty: what the replacement costs beyond the original, clean
+        let original = TreasuryMath.cleanCost(t.nominal, t.priceMicro);
+        let replacement = TreasuryMath.cleanCost(t.nominal, x.priceMicro);
+        let claim = if (replacement > original) replacement - original else 0;
+        let depotAssigned : [T.Event] = switch (CustodyCore.bookDepotOf(s.custody, r.book)) { case (?d) [#custody(#dealDepotAssigned({ deal = replacementId; depot = d; day = today }))]; case null [] };
+        let extras = Array.concat<T.Event>(Array.concat<T.Event>([#treasury(te), #treasury(cap.ev)], Array.map<TT.TreasuryEvent, T.Event>(cap.extras, func(e) { #treasury(e) })), depotAssigned);
+        let ev : T.Event = #settlement(#boughtIn({ instruction = i.id; replacement = replacementId; claim; day = today }));
+        if (claim == 0) return #ok({ event = ?ev; extra = extras; journal = [] });
+        let ?p = TreasuryCore.policy(s.treasury) else return treasuryErr(#NoPolicy);
+        let legs = [Posting.leg(venue.claimsAccount, ?Posting.subledgerOf("settlement/" # Nat.toText(i.id)), #debit, sec.currency, claim), Posting.leg(p.realisedTradingGain, null, #credit, sec.currency, claim)];
+        switch (postLegs(js, journalCaller, now, "settlement-claim", [authId, Nat.toText(i.id)], legs, x.postingDate, x.valueDate, x.period, x.narration)) {
+          case (#err(e)) #err(e);
+          case (#ok(plan)) #ok({ event = ?ev; extra = extras; journal = plan.journal });
+        }
+      };
+      case (#splitDeal(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        let r = switch (treasuryRow(s, x.deal)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        let kind = switch (treasuryKind(bb, r)) { case (#err(e)) return #err(e); case (#ok(k)) k };
+        let #security(t) = kind else return settlementErr(#DealNotSettleable({ deal = x.deal; reason = "not a security" }));
+        switch (SettlementCore.ledger(s.settlement, #security({ isin = t.isin }))) { case (?l) { if (not l.partial) return settlementErr(#PartialNotAllowed({ isin = t.isin })) }; case null return settlementErr(#NoLedger({ role = #security({ isin = t.isin }) })) };
+        switch (SettlementCore.openInstructionOf(s.settlement, x.deal, 0)) { case (?i) return settlementErr(#AlreadyInstructed({ deal = x.deal; instruction = i.id })); case null {} };
+        if (x.parts.size() < 2 or x.parts.size() > 16) return settlementErr(#InvalidTerms({ reason = "a deal splits into 2..16 parts" }));
+        var sum = 0; for (q in x.parts.vals()) { if (q == 0) return settlementErr(#InvalidTerms({ reason = "every part is positive" })); sum += q };
+        if (sum != t.nominal) return settlementErr(#InvalidTerms({ reason = "the parts sum to the deal's nominal" }));
+        let ctx = switch (treasuryCtx(s)) { case (#err(e)) return #err(e); case (#ok(c)) c };
+        let te = switch (TreasuryCore.planCancel(s.treasury, x.deal, "split for partial delivery", today)) { case (#err(e)) return treasuryErr(e); case (#ok(e)) e };
+        let (cp, trader, reference) = switch (bb.get(x.deal)) { case (?b) { switch (b.event) { case (#treasury(#dealCaptured(c))) (c.counterparty, c.trader, c.reference); case (_) return treasuryErr(#UnknownDeal({ deal = x.deal })) } }; case null return treasuryErr(#UnknownDeal({ deal = x.deal })) };
+        let depot = CustodyCore.bookDepotOf(s.custody, r.book);
+        let extras = List.empty<T.Event>();
+        List.add(extras, #treasury(te));
+        var next = s.height + 2;   // the split at s.height, the cancellation after it, then the parts
+        var partNo = 1;
+        for (q in x.parts.vals()) {
+          let terms : TT.SecurityTrade = { t with nominal = q };
+          // the parts are captured with the split's approver: the exposure they add is the original's, cancelled in the same act
+          let cap = switch (TreasuryCore.planCapture(s.treasury, next, r.book, cp, #security(terms), reference # "/" # Nat.toText(partNo), trader, today, ?authority, ctx, treasuryTerms(bb))) { case (#err(e)) return treasuryErr(e); case (#ok(c)) c };
+          List.add(extras, #treasury(cap.ev));
+          var used = 1;
+          for (e in cap.extras.vals()) { List.add(extras, #treasury(e)); used += 1 };
+          switch (depot) { case (?d) { List.add(extras, #custody(#dealDepotAssigned({ deal = next; depot = d; day = today }))); used += 1 }; case null {} };
+          next += used; partNo += 1;
+        };
+        #ok({ event = ?#settlement(#split({ deal = x.deal; parts = x.parts; day = today })); extra = List.toArray(extras); journal = [] })
+      };
       case (#processCorporateAction(x)) {
         switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
         switch (nextActionAct(s, bb, x.action, x.valueDate)) {
@@ -723,6 +899,8 @@ module {
         let kind = switch (treasuryKind(bb, r)) { case (#err(e)) return #err(e); case (#ok(k)) k };
         let ctx = switch (treasuryCtx(s)) { case (#err(e)) return #err(e); case (#ok(c)) c };
         switch (saleDepotCheck(s, r, kind, x.leg)) { case (?e) return #err(e); case null {} };
+        // a leg in Tachyon's hands settles from Tachyon's receipt, never by hand
+        switch (SettlementCore.openInstructionOf(s.settlement, x.deal, x.leg)) { case (?i) return settlementErr(#AlreadyInstructed({ deal = x.deal; instruction = i.id })); case null {} };
         switch (TreasuryCore.planSettleLeg(s.treasury, r, kind, x.leg, x.valueDate, ctx)) {
           case (#err(e)) treasuryErr(e);
           case (#ok(act)) treasuryPost(js, journalCaller, now, "treasury-settle", [authId, Nat.toText(x.deal), Nat.toText(x.leg)], act, x.postingDate, x.valueDate, x.period, x.narration);
@@ -991,6 +1169,8 @@ module {
         switch (TreasuryCore.legDue(kind, leg, secMaturity)) {
           case (?due) {
             if (due > day) break legs;
+            // a leg in Tachyon's hands settles from Tachyon's receipt: the run leaves it and everything after it
+            if (SettlementCore.openInstructionOf(s.settlement, r.id, leg) != null) break legs;
             switch (saleDepotCheck(s, r, kind, leg)) { case (?e) { fail(acc, index, item.job, book, r.id, debug_show e); break legs }; case null {} };
             switch (TreasuryCore.planSettleLeg(s.treasury, r, kind, leg, day, ctx)) {
               case (#ok(a)) { if (not post("treasury-settle", r.id, Nat.toText(leg), a, "leg " # Nat.toText(leg) # " settled")) break legs };
@@ -1081,11 +1261,44 @@ module {
     };
   };
 
+  /// The settlement job: the cycle of the day closed. Every instruction of the cycle still open is failed with the
+  /// cause named and, within the venue's recycle limit, recycled into the next business day's cycle (opened by the
+  /// recycling when it does not exist, with the closing cycle's market and price source); past the limit it waits
+  /// for a decision. The desk's escrow on a failed trade is reclaimed by the driver once Tachyon aborts it.
+  func jobSettlement(s : State, js : JCore.State, acc : ChunkAcc, item : Batch.PlanItem, index : Nat, day : Nat, book : Text, onlyInstruction : ?Nat) {
+    let ?c = SettlementCore.cycle(s.settlement, day) else return;
+    if (c.state != #open) return;
+    let ?venue = SettlementCore.venue(s.settlement) else { fail(acc, index, item.job, book, 0, "no settlement venue"); return };
+    let nextDay = nextBusinessDay(js)(day + 1);
+    var settled = 0; var failed = 0; var pending = 0;
+    for (i in SettlementCore.instructionsOfCycle(s.settlement, day).vals()) {
+      let mine = switch (onlyInstruction) { case null true; case (?x) x == i.id };
+      switch (i.state) {
+        case (#settled) settled += 1;
+        case (#boughtIn or #cancelled) {};
+        case (#failed) { if (i.cycle == day) failed += 1 };
+        case (_) {
+          if (not mine) { pending += 1; continue };
+          acc.examined += 1;
+          let fails = i.fails + 1;
+          record(acc, #settlement(#failed({ instruction = i.id; cause = "not settled by the close of cycle " # Nat.toText(day) # " (" # ST.stateText(i.state) # ")"; fails; day })));
+          failed += 1;
+          if (fails <= venue.recycleLimit) {
+            if (SettlementCore.cycle(s.settlement, nextDay) == null) record(acc, #settlement(#cycleOpened({ cycle = { businessDate = nextDay; market = c.market; priceSource = c.priceSource }; day })));
+            record(acc, #settlement(#recycled({ instruction = i.id; cycle = nextDay; fails; day })));
+          };
+        };
+      };
+    };
+    if (onlyInstruction == null) record(acc, #settlement(#cycleClosed({ businessDate = day; settled; failed; pending; day })));
+  };
+
   func runItem(s : State, bb : Blocks, js : JCore.State, jb : JCore.Blocks, journalCaller : Principal, now : Nat64, acc : ChunkAcc, run : Eod.Run, item : Batch.PlanItem, index : Nat, day : Nat, onlyDeal : ?Nat) {
     let ?period = periodForDay(js, day) else { acc.examined += 1; fail(acc, index, item.job, run.book, 0, "no open period contains day " # Nat.toText(day)); return };
     if (Text.equal(item.job.name, Eod.JOB_TREASURY.name)) jobTreasury(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
     else if (Text.equal(item.job.name, Eod.JOB_CALLS.name)) jobCalls(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
     else if (Text.equal(item.job.name, Eod.JOB_CUSTODY.name)) jobCustody(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
+    else if (Text.equal(item.job.name, Eod.JOB_SETTLEMENT.name)) jobSettlement(s, js, acc, item, index, day, run.book, onlyDeal)
     else fail(acc, index, item.job, run.book, 0, "unknown job " # item.job.name);
   };
 
@@ -1157,6 +1370,7 @@ module {
       case (#treasury(te)) { TreasuryCore.fold(s.treasury, block.index, te); CustodyCore.observeTreasury(s.custody, te, func(id : Nat) : ?TreasuryCore.DealRow { TreasuryCore.row(s.treasury, id) }) };
       case (#call(ce)) CallCore.fold(s.calls, block.index, ce);
       case (#custody(ce)) CustodyCore.fold(s.custody, block.index, ce, isinOfLot(s));
+      case (#settlement(se)) SettlementCore.fold(s.settlement, block.index, se);
       case (_) Auth.apply(s.authority, block);
     };
     if (block.index + 1 > s.height) s.height := block.index + 1;
@@ -1231,6 +1445,7 @@ module {
     TreasuryCore.fingerprintInto(w, s.treasury);
     CallCore.fingerprintInto(w, s.calls);
     CustodyCore.fingerprintInto(w, s.custody);
+    SettlementCore.fingerprintInto(w, s.settlement);
   };
   public func fingerprint(s : State) : Blob { let w = JC.Writer(); fingerprintInto(w, s); KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob()) };
   /// The fingerprint by section, so a divergence between the live state and a fresh fold names the sub-state.
@@ -1245,6 +1460,7 @@ module {
       one("treasury", func(w) { TreasuryCore.fingerprintInto(w, s.treasury) }),
       one("calls", func(w) { CallCore.fingerprintInto(w, s.calls) }),
       one("custody", func(w) { CustodyCore.fingerprintInto(w, s.custody) }),
+      one("settlement", func(w) { SettlementCore.fingerprintInto(w, s.settlement) }),
     ]
   };
 

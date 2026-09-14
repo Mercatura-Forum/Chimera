@@ -127,6 +127,80 @@ class Reader(V.Reader):
             return {"entitlementClaimed": {"action": self.nat(), "lot": self.nat(), "amount": self.nat(), "accrued": self.int_(), "day": self.nat()}}
         raise ValueError(f"unknown custody event tag {t:#x}")
 
+    def venue(self):
+        return {"core": self.principal(), "deadlineSecs": self.nat(), "recycleLimit": self.nat(), "claimsAccount": self.text()}
+
+    def ledger_role(self):
+        t = self.byte()
+        if t == 1:
+            return {"cash": {"currency": self.text()}}
+        if t == 2:
+            return {"security": {"isin": self.text()}}
+        raise ValueError(f"unknown ledger role {t}")
+
+    def declaration(self):
+        return {"role": self.ledger_role(), "ledger": self.principal(), "partial": self.bool()}
+
+    def cycle(self):
+        return {"businessDate": self.nat(), "market": self.text(), "priceSource": self.text()}
+
+    def instruction(self):
+        return {"deal": self.nat(), "leg": self.nat(), "cycle": self.nat(), "role": {1: "maker", 2: "taker"}[self.byte()], "counterparty": self.principal(),
+                "assetLedger": self.principal(), "assetAmount": self.nat(), "cashLedger": self.principal(), "cashAmount": self.nat(),
+                "tradeId": self.opt_nat(), "reference": self.text(), "documentHash": self.blob()}
+
+    def blobs(self):
+        return [self.blob() for _ in range(self.nats_len())]
+
+    def nats_len(self):
+        return self.nat()
+
+    def settlement_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"venueSet": self.venue()}
+        if t == 0x02:
+            return {"ledgerSet": self.declaration()}
+        if t == 0x03:
+            return {"cycleOpened": {"cycle": self.cycle(), "day": self.nat()}}
+        if t == 0x04:
+            return {"cycleClosed": {"businessDate": self.nat(), "settled": self.nat(), "failed": self.nat(), "pending": self.nat(), "day": self.nat()}}
+        if t == 0x05:
+            return {"instructed": {"instruction": self.instruction(), "day": self.nat()}}
+        if t == 0x06:
+            return {"tradeOpened": {"instruction": self.nat(), "tradeId": self.nat(), "escrowed": self.bool(), "note": self.text(), "day": self.nat()}}
+        if t == 0x07:
+            return {"tradeVerified": {"instruction": self.nat(), "tradeId": self.nat(), "day": self.nat()}}
+        if t == 0x08:
+            return {"fundingRecorded": {"instruction": self.nat(), "tradeId": self.nat(), "escrowed": self.bool(), "bothEscrowed": self.bool(), "note": self.text(), "day": self.nat()}}
+        if t == 0x09:
+            return {"callRefused": {"instruction": self.nat(), "step": self.text(), "reason": self.text(), "day": self.nat()}}
+        if t == 0x0A:
+            return {"auditSynced": {"from": self.nat(), "leaves": self.blobs(), "root": self.blob(), "day": self.nat()}}
+        if t == 0x0B:
+            return {"receiptVerified": {"instruction": self.nat(), "tradeId": self.nat(), "seq": self.nat(), "leaf": self.blob(), "root": self.blob(), "assetPaid": self.nat(), "cashPaid": self.nat(), "day": self.nat()}}
+        if t == 0x0C:
+            return {"settled": {"instruction": self.nat(), "tradeId": self.nat(), "day": self.nat()}}
+        if t == 0x0D:
+            return {"failed": {"instruction": self.nat(), "cause": self.text(), "fails": self.nat(), "day": self.nat()}}
+        if t == 0x0E:
+            return {"recycled": {"instruction": self.nat(), "cycle": self.nat(), "fails": self.nat(), "day": self.nat()}}
+        if t == 0x0F:
+            return {"reclaimed": {"instruction": self.nat(), "tradeId": self.nat(), "note": self.text(), "day": self.nat()}}
+        if t == 0x10:
+            return {"tradeReset": {"instruction": self.nat(), "previous": self.nat(), "day": self.nat()}}
+        if t == 0x11:
+            return {"boughtIn": {"instruction": self.nat(), "replacement": self.nat(), "claim": self.nat(), "day": self.nat()}}
+        if t == 0x12:
+            return {"cancelled": {"instruction": self.nat(), "ourConsent": self.blob(), "theirConsent": self.blob(), "reason": self.text(), "day": self.nat()}}
+        if t == 0x13:
+            return {"statusReceived": {"instruction": self.nat(), "status": self.text(), "quantity": self.nat(), "amount": self.nat(), "matched": self.bool(), "documentHash": self.blob(), "day": self.nat()}}
+        if t == 0x14:
+            return {"split": {"deal": self.nat(), "parts": self.nats(), "day": self.nat()}}
+        if t == 0x15:
+            return {"tradeAssigned": {"instruction": self.nat(), "tradeId": self.nat(), "day": self.nat()}}
+        raise ValueError(f"unknown settlement event tag {t:#x}")
+
     def call_event(self):
         t = self.byte()
         if t == 0x01:
@@ -236,6 +310,26 @@ class Reader(V.Reader):
             return {"cancelCorporateAction": {"action": self.nat(), "reason": self.text()}}
         if tag == 0x58:
             return {"processCorporateAction": {"action": self.nat(), **self.dates()}}
+        if tag == 0x60:
+            return {"setSettlementVenue": {"venue": self.venue()}}
+        if tag == 0x61:
+            return {"setSettlementLedger": {"declaration": self.declaration()}}
+        if tag == 0x62:
+            return {"openSettlementCycle": {"cycle": self.cycle()}}
+        if tag == 0x63:
+            return {"instructSettlement": {"deal": self.nat(), "counterparty": self.principal(), "tradeId": self.opt_nat(), "reference": self.text()}}
+        if tag == 0x64:
+            return {"setInstructionTrade": {"instruction": self.nat(), "tradeId": self.nat()}}
+        if tag == 0x65:
+            return {"recycleSettlement": {"instruction": self.nat(), "cycle": self.nat()}}
+        if tag == 0x66:
+            return {"recordSettlementStatus": {"instruction": self.nat(), "document": self.blob()}}
+        if tag == 0x67:
+            return {"buyIn": {"instruction": self.nat(), "counterparty": self.t_counterparty(), "priceMicro": self.nat(), "settlement": self.nat(), "reference": self.text(), **self.dates()}}
+        if tag == 0x68:
+            return {"cancelSettlement": {"instruction": self.nat(), "ourConsent": self.blob(), "theirConsent": self.blob(), "reason": self.text()}}
+        if tag == 0x69:
+            return {"splitDeal": {"deal": self.nat(), "parts": self.nats()}}
         raise ValueError(f"unknown command tag {tag:#x}")
 
     def proposed(self):
@@ -319,6 +413,8 @@ class Reader(V.Reader):
             return {"call": self.call_event()}
         if t == 0x61:
             return {"custody": self.custody_event()}
+        if t == 0x62:
+            return {"settlement": self.settlement_event()}
         raise ValueError(f"unknown desk event tag {t:#x}")
 
     # ── lifted without change from Manticore's verify_bank.py at 9c0c30e ──

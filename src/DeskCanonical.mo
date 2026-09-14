@@ -16,6 +16,7 @@
 import Array "mo:core/Array";
 import Int "mo:core/Int";
 import VarArray "mo:core/VarArray";
+import List "mo:core/List";
 import Blob "mo:core/Blob";
 
 import JC "mo:journal/Canonical";
@@ -35,6 +36,7 @@ import PC "mo:manticore/ProductCanonical";
 
 import CallT "CallTypes";
 import CuT "CustodyTypes";
+import ST "SettlementTypes";
 
 import T "DeskTypes";
 
@@ -196,6 +198,81 @@ module {
     }
   };
 
+  // ─── settlement ───
+  func wVenue(w : JC.Writer, v : ST.Venue) { w.principal(v.core); w.nat(v.deadlineSecs); w.nat(v.recycleLimit); w.text(v.claimsAccount) };
+  func rVenue(r : JC.Reader) : ?ST.Venue { let ?core = r.principal() else return null; let ?deadlineSecs = r.nat() else return null; let ?recycleLimit = r.nat() else return null; let ?claimsAccount = r.text() else return null; ?{ core; deadlineSecs; recycleLimit; claimsAccount } };
+  func wLedgerRole(w : JC.Writer, x : ST.LedgerRole) { switch (x) { case (#cash(c)) { w.byte(1); w.text(c.currency) }; case (#security(i)) { w.byte(2); w.text(i.isin) } } };
+  func rLedgerRole(r : JC.Reader) : ?ST.LedgerRole { switch (r.byte()) { case (?1) { let ?currency = r.text() else return null; ?#cash({ currency }) }; case (?2) { let ?isin = r.text() else return null; ?#security({ isin }) }; case (_) null } };
+  func wDeclaration(w : JC.Writer, d : ST.LedgerDeclaration) { wLedgerRole(w, d.role); w.principal(d.ledger); w.bool(d.partial) };
+  func rDeclaration(r : JC.Reader) : ?ST.LedgerDeclaration { let ?role = rLedgerRole(r) else return null; let ?ledger = r.principal() else return null; let ?partial = r.bool() else return null; ?{ role; ledger; partial } };
+  func wCycle(w : JC.Writer, c : ST.Cycle) { w.nat(c.businessDate); w.text(c.market); w.text(c.priceSource) };
+  func rCycle(r : JC.Reader) : ?ST.Cycle { let ?businessDate = r.nat() else return null; let ?market = r.text() else return null; let ?priceSource = r.text() else return null; ?{ businessDate; market; priceSource } };
+  func wRole(w : JC.Writer, x : ST.Role) { w.byte(switch (x) { case (#maker) 1; case (#taker) 2 }) };
+  func rRole(r : JC.Reader) : ?ST.Role { switch (r.byte()) { case (?1) ?#maker; case (?2) ?#taker; case (_) null } };
+  func wInstruction(w : JC.Writer, i : ST.Instruction) {
+    w.nat(i.deal); w.nat(i.leg); w.nat(i.cycle); wRole(w, i.role); w.principal(i.counterparty); w.principal(i.assetLedger); w.nat(i.assetAmount); w.principal(i.cashLedger); w.nat(i.cashAmount);
+    w.optNat(i.tradeId); w.text(i.reference); w.blob(i.documentHash);
+  };
+  func rInstruction(r : JC.Reader) : ?ST.Instruction {
+    let ?deal = r.nat() else return null; let ?leg = r.nat() else return null; let ?cycle = r.nat() else return null; let ?role = rRole(r) else return null; let ?counterparty = r.principal() else return null;
+    let ?assetLedger = r.principal() else return null; let ?assetAmount = r.nat() else return null; let ?cashLedger = r.principal() else return null; let ?cashAmount = r.nat() else return null;
+    let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; let ?documentHash = r.blob() else return null;
+    ?{ deal; leg; cycle; role; counterparty; assetLedger; assetAmount; cashLedger; cashAmount; tradeId; reference; documentHash }
+  };
+  func wBlobs(w : JC.Writer, xs : [Blob]) { w.nat(xs.size()); for (x in xs.vals()) w.blob(x) };
+  func rBlobs(r : JC.Reader) : ?[Blob] { let ?n = r.nat() else return null; if (n > 100_000) return null; let out = List.empty<Blob>(); var i = 0; while (i < n) { let ?b = r.blob() else return null; List.add(out, b); i += 1 }; ?List.toArray(out) };
+  func wSettlementEvent(w : JC.Writer, e : ST.Event) {
+    switch (e) {
+      case (#venueSet(v)) { w.byte(0x01); wVenue(w, v) };
+      case (#ledgerSet(d)) { w.byte(0x02); wDeclaration(w, d) };
+      case (#cycleOpened(x)) { w.byte(0x03); wCycle(w, x.cycle); w.nat(x.day) };
+      case (#cycleClosed(x)) { w.byte(0x04); w.nat(x.businessDate); w.nat(x.settled); w.nat(x.failed); w.nat(x.pending); w.nat(x.day) };
+      case (#instructed(x)) { w.byte(0x05); wInstruction(w, x.instruction); w.nat(x.day) };
+      case (#tradeOpened(x)) { w.byte(0x06); w.nat(x.instruction); w.nat(x.tradeId); w.bool(x.escrowed); w.text(x.note); w.nat(x.day) };
+      case (#tradeVerified(x)) { w.byte(0x07); w.nat(x.instruction); w.nat(x.tradeId); w.nat(x.day) };
+      case (#fundingRecorded(x)) { w.byte(0x08); w.nat(x.instruction); w.nat(x.tradeId); w.bool(x.escrowed); w.bool(x.bothEscrowed); w.text(x.note); w.nat(x.day) };
+      case (#callRefused(x)) { w.byte(0x09); w.nat(x.instruction); w.text(x.step); w.text(x.reason); w.nat(x.day) };
+      case (#auditSynced(x)) { w.byte(0x0A); w.nat(x.from); wBlobs(w, x.leaves); w.blob(x.root); w.nat(x.day) };
+      case (#receiptVerified(x)) { w.byte(0x0B); w.nat(x.instruction); w.nat(x.tradeId); w.nat(x.seq); w.blob(x.leaf); w.blob(x.root); w.nat(x.assetPaid); w.nat(x.cashPaid); w.nat(x.day) };
+      case (#settled(x)) { w.byte(0x0C); w.nat(x.instruction); w.nat(x.tradeId); w.nat(x.day) };
+      case (#failed(x)) { w.byte(0x0D); w.nat(x.instruction); w.text(x.cause); w.nat(x.fails); w.nat(x.day) };
+      case (#recycled(x)) { w.byte(0x0E); w.nat(x.instruction); w.nat(x.cycle); w.nat(x.fails); w.nat(x.day) };
+      case (#reclaimed(x)) { w.byte(0x0F); w.nat(x.instruction); w.nat(x.tradeId); w.text(x.note); w.nat(x.day) };
+      case (#tradeReset(x)) { w.byte(0x10); w.nat(x.instruction); w.nat(x.previous); w.nat(x.day) };
+      case (#boughtIn(x)) { w.byte(0x11); w.nat(x.instruction); w.nat(x.replacement); w.nat(x.claim); w.nat(x.day) };
+      case (#cancelled(x)) { w.byte(0x12); w.nat(x.instruction); w.blob(x.ourConsent); w.blob(x.theirConsent); w.text(x.reason); w.nat(x.day) };
+      case (#statusReceived(x)) { w.byte(0x13); w.nat(x.instruction); w.text(x.status); w.nat(x.quantity); w.nat(x.amount); w.bool(x.matched); w.blob(x.documentHash); w.nat(x.day) };
+      case (#split(x)) { w.byte(0x14); w.nat(x.deal); wNats(w, x.parts); w.nat(x.day) };
+      case (#tradeAssigned(x)) { w.byte(0x15); w.nat(x.instruction); w.nat(x.tradeId); w.nat(x.day) };
+    }
+  };
+  func rSettlementEvent(r : JC.Reader) : ?ST.Event {
+    switch (r.byte()) {
+      case (?0x01) { let ?v = rVenue(r) else return null; ?#venueSet(v) };
+      case (?0x02) { let ?d = rDeclaration(r) else return null; ?#ledgerSet(d) };
+      case (?0x03) { let ?cycle = rCycle(r) else return null; let ?day = r.nat() else return null; ?#cycleOpened({ cycle; day }) };
+      case (?0x04) { let ?businessDate = r.nat() else return null; let ?settled = r.nat() else return null; let ?failed = r.nat() else return null; let ?pending = r.nat() else return null; let ?day = r.nat() else return null; ?#cycleClosed({ businessDate; settled; failed; pending; day }) };
+      case (?0x05) { let ?instruction = rInstruction(r) else return null; let ?day = r.nat() else return null; ?#instructed({ instruction; day }) };
+      case (?0x06) { let ?instruction = r.nat() else return null; let ?tradeId = r.nat() else return null; let ?escrowed = r.bool() else return null; let ?note = r.text() else return null; let ?day = r.nat() else return null; ?#tradeOpened({ instruction; tradeId; escrowed; note; day }) };
+      case (?0x07) { let ?instruction = r.nat() else return null; let ?tradeId = r.nat() else return null; let ?day = r.nat() else return null; ?#tradeVerified({ instruction; tradeId; day }) };
+      case (?0x08) { let ?instruction = r.nat() else return null; let ?tradeId = r.nat() else return null; let ?escrowed = r.bool() else return null; let ?bothEscrowed = r.bool() else return null; let ?note = r.text() else return null; let ?day = r.nat() else return null; ?#fundingRecorded({ instruction; tradeId; escrowed; bothEscrowed; note; day }) };
+      case (?0x09) { let ?instruction = r.nat() else return null; let ?step = r.text() else return null; let ?reason = r.text() else return null; let ?day = r.nat() else return null; ?#callRefused({ instruction; step; reason; day }) };
+      case (?0x0A) { let ?from = r.nat() else return null; let ?leaves = rBlobs(r) else return null; let ?root = r.blob() else return null; let ?day = r.nat() else return null; ?#auditSynced({ from; leaves; root; day }) };
+      case (?0x0B) { let ?instruction = r.nat() else return null; let ?tradeId = r.nat() else return null; let ?seq = r.nat() else return null; let ?leaf = r.blob() else return null; let ?root = r.blob() else return null; let ?assetPaid = r.nat() else return null; let ?cashPaid = r.nat() else return null; let ?day = r.nat() else return null; ?#receiptVerified({ instruction; tradeId; seq; leaf; root; assetPaid; cashPaid; day }) };
+      case (?0x0C) { let ?instruction = r.nat() else return null; let ?tradeId = r.nat() else return null; let ?day = r.nat() else return null; ?#settled({ instruction; tradeId; day }) };
+      case (?0x0D) { let ?instruction = r.nat() else return null; let ?cause = r.text() else return null; let ?fails = r.nat() else return null; let ?day = r.nat() else return null; ?#failed({ instruction; cause; fails; day }) };
+      case (?0x0E) { let ?instruction = r.nat() else return null; let ?cycle = r.nat() else return null; let ?fails = r.nat() else return null; let ?day = r.nat() else return null; ?#recycled({ instruction; cycle; fails; day }) };
+      case (?0x0F) { let ?instruction = r.nat() else return null; let ?tradeId = r.nat() else return null; let ?note = r.text() else return null; let ?day = r.nat() else return null; ?#reclaimed({ instruction; tradeId; note; day }) };
+      case (?0x10) { let ?instruction = r.nat() else return null; let ?previous = r.nat() else return null; let ?day = r.nat() else return null; ?#tradeReset({ instruction; previous; day }) };
+      case (?0x11) { let ?instruction = r.nat() else return null; let ?replacement = r.nat() else return null; let ?claim = r.nat() else return null; let ?day = r.nat() else return null; ?#boughtIn({ instruction; replacement; claim; day }) };
+      case (?0x12) { let ?instruction = r.nat() else return null; let ?ourConsent = r.blob() else return null; let ?theirConsent = r.blob() else return null; let ?reason = r.text() else return null; let ?day = r.nat() else return null; ?#cancelled({ instruction; ourConsent; theirConsent; reason; day }) };
+      case (?0x13) { let ?instruction = r.nat() else return null; let ?status = r.text() else return null; let ?quantity = r.nat() else return null; let ?amount = r.nat() else return null; let ?matched = r.bool() else return null; let ?documentHash = r.blob() else return null; let ?day = r.nat() else return null; ?#statusReceived({ instruction; status; quantity; amount; matched; documentHash; day }) };
+      case (?0x14) { let ?deal = r.nat() else return null; let ?parts = rNats(r) else return null; let ?day = r.nat() else return null; ?#split({ deal; parts; day }) };
+      case (?0x15) { let ?instruction = r.nat() else return null; let ?tradeId = r.nat() else return null; let ?day = r.nat() else return null; ?#tradeAssigned({ instruction; tradeId; day }) };
+      case (_) null;
+    }
+  };
+
   public func writeScope(w : JC.Writer, s : AT.Scope) { wOptTexts(w, s.partitions); wOptTexts(w, s.currencies); wMoneys(w, s.ceiling); wMoneys(w, s.dailyLimit) };
   public func readScope(r : JC.Reader) : ?AT.Scope {
     let ?partitions = rOptTexts(r) else return null; let ?currencies = rOptTexts(r) else return null;
@@ -262,6 +339,16 @@ module {
       case (#announceCorporateAction(x)) { w.byte(0x56); wAnnouncement(w, x.announcement) };
       case (#cancelCorporateAction(x)) { w.byte(0x57); w.nat(x.action); w.text(x.reason) };
       case (#processCorporateAction(x)) { w.byte(0x58); w.nat(x.action); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#setSettlementVenue(x)) { w.byte(0x60); wVenue(w, x.venue) };
+      case (#setSettlementLedger(x)) { w.byte(0x61); wDeclaration(w, x.declaration) };
+      case (#openSettlementCycle(x)) { w.byte(0x62); wCycle(w, x.cycle) };
+      case (#instructSettlement(x)) { w.byte(0x63); w.nat(x.deal); w.principal(x.counterparty); w.optNat(x.tradeId); w.text(x.reference) };
+      case (#setInstructionTrade(x)) { w.byte(0x64); w.nat(x.instruction); w.nat(x.tradeId) };
+      case (#recycleSettlement(x)) { w.byte(0x65); w.nat(x.instruction); w.nat(x.cycle) };
+      case (#recordSettlementStatus(x)) { w.byte(0x66); w.nat(x.instruction); w.blob(x.document) };
+      case (#buyIn(x)) { w.byte(0x67); w.nat(x.instruction); TyCan.writeCounterparty(w, x.counterparty); w.nat(x.priceMicro); w.nat(x.settlement); w.text(x.reference); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#cancelSettlement(x)) { w.byte(0x68); w.nat(x.instruction); w.blob(x.ourConsent); w.blob(x.theirConsent); w.text(x.reason) };
+      case (#splitDeal(x)) { w.byte(0x69); w.nat(x.deal); wNats(w, x.parts) };
       case (#setTreasuryPolicy(p)) { w.byte(0x20); TyCan.writePolicy(w, p) };
       case (#registerSecurity(x)) { w.byte(0x21); TyCan.writeSecurityTerms(w, x.terms) };
       case (#publishCurve(x)) { w.byte(0x22); TyCan.writeCurve(w, x.curve) };
@@ -333,6 +420,16 @@ module {
       case 0x56 { let ?announcement = rAnnouncement(r) else return null; ?#announceCorporateAction({ announcement }) };
       case 0x57 { let ?action = r.nat() else return null; let ?reason = r.text() else return null; ?#cancelCorporateAction({ action; reason }) };
       case 0x58 { let ?action = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#processCorporateAction({ action; postingDate; valueDate; period; narration }) };
+      case 0x60 { let ?venue = rVenue(r) else return null; ?#setSettlementVenue({ venue }) };
+      case 0x61 { let ?declaration = rDeclaration(r) else return null; ?#setSettlementLedger({ declaration }) };
+      case 0x62 { let ?cycle = rCycle(r) else return null; ?#openSettlementCycle({ cycle }) };
+      case 0x63 { let ?deal = r.nat() else return null; let ?counterparty = r.principal() else return null; let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; ?#instructSettlement({ deal; counterparty; tradeId; reference }) };
+      case 0x64 { let ?instruction = r.nat() else return null; let ?tradeId = r.nat() else return null; ?#setInstructionTrade({ instruction; tradeId }) };
+      case 0x65 { let ?instruction = r.nat() else return null; let ?cycle = r.nat() else return null; ?#recycleSettlement({ instruction; cycle }) };
+      case 0x66 { let ?instruction = r.nat() else return null; let ?document = r.blob() else return null; ?#recordSettlementStatus({ instruction; document }) };
+      case 0x67 { let ?instruction = r.nat() else return null; let ?counterparty = TyCan.readCounterparty(r) else return null; let ?priceMicro = r.nat() else return null; let ?settlement = r.nat() else return null; let ?reference = r.text() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#buyIn({ instruction; counterparty; priceMicro; settlement; reference; postingDate; valueDate; period; narration }) };
+      case 0x68 { let ?instruction = r.nat() else return null; let ?ourConsent = r.blob() else return null; let ?theirConsent = r.blob() else return null; let ?reason = r.text() else return null; ?#cancelSettlement({ instruction; ourConsent; theirConsent; reason }) };
+      case 0x69 { let ?deal = r.nat() else return null; let ?parts = rNats(r) else return null; ?#splitDeal({ deal; parts }) };
       case 0x20 { let ?p = TyCan.readPolicy(r) else return null; ?#setTreasuryPolicy(p) };
       case 0x21 { let ?terms = TyCan.readSecurityTerms(r) else return null; ?#registerSecurity({ terms }) };
       case 0x22 { let ?curve = TyCan.readCurve(r) else return null; ?#publishCurve({ curve }) };
@@ -528,6 +625,7 @@ module {
       case (#treasury(te)) { w.byte(0x55); TyCan.writeEvent(w, te) };
       case (#call(ce)) { w.byte(0x60); wCallEvent(w, ce) };
       case (#custody(ce)) { w.byte(0x61); wCustodyEvent(w, ce) };
+      case (#settlement(se)) { w.byte(0x62); wSettlementEvent(w, se) };
     }
   };
 
@@ -573,6 +671,7 @@ module {
       case 0x55 { let ?te = TyCan.readEvent(r) else return null; ?#treasury(te) };
       case 0x60 { let ?ce = rCallEvent(r) else return null; ?#call(ce) };
       case 0x61 { let ?ce = rCustodyEvent(r) else return null; ?#custody(ce) };
+      case 0x62 { let ?se = rSettlementEvent(r) else return null; ?#settlement(se) };
       case _ null;
     };
     switch (out) {

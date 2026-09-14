@@ -25,6 +25,7 @@ import AlT "mo:manticore/AlertTypes";
 
 import CallT "CallTypes";
 import CuT "CustodyTypes";
+import ST "SettlementTypes";
 
 module {
 
@@ -103,6 +104,17 @@ module {
     #announceCorporateAction : { announcement : CuT.Announcement };
     #cancelCorporateAction : { action : CuT.ActionId; reason : Text };
     #processCorporateAction : { action : CuT.ActionId; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    // ── settlement through Tachyon: the venue, the cycles, the instructions and the decisions on a fail ──
+    #setSettlementVenue : { venue : ST.Venue };
+    #setSettlementLedger : { declaration : ST.LedgerDeclaration };
+    #openSettlementCycle : { cycle : ST.Cycle };
+    #instructSettlement : { deal : TT.DealId; counterparty : Principal; tradeId : ?Nat; reference : Text };
+    #setInstructionTrade : { instruction : ST.InstructionId; tradeId : Nat };
+    #recycleSettlement : { instruction : ST.InstructionId; cycle : Day };
+    #recordSettlementStatus : { instruction : ST.InstructionId; document : Blob };
+    #buyIn : { instruction : ST.InstructionId; counterparty : TT.Counterparty; priceMicro : Nat; settlement : Day; reference : Text; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    #cancelSettlement : { instruction : ST.InstructionId; ourConsent : Blob; theirConsent : Blob; reason : Text };
+    #splitDeal : { deal : TT.DealId; parts : [Nat] };
     // ── treasury: the thirteen commands of Manticore's treasury domain, their bodies Manticore's ──
     #setTreasuryPolicy : TT.Policy;
     #registerSecurity : { terms : TT.SecurityTerms };
@@ -169,6 +181,7 @@ module {
     #treasury : TT.TreasuryEvent;
     #call : CallT.Event;
     #custody : CuT.Event;
+    #settlement : ST.Event;
   };
 
   public type BatchError = {
@@ -239,6 +252,7 @@ module {
     #TreasuryError : { error : TT.TreasuryError };
     #CallError : { error : CallT.Error };
     #CustodyError : { error : CuT.Error };
+    #SettlementError : { error : ST.Error };
     #MissingRate : { currency : Text; asOf : Day };
   };
 
@@ -333,6 +347,7 @@ module {
       case (#treasury(_)) "treasury";
       case (#call(_)) "call";
       case (#custody(_)) "custody";
+      case (#settlement(_)) "settlement";
     }
   };
 }

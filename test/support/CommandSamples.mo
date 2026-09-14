@@ -14,6 +14,7 @@ import TT "mo:manticore/TreasuryTypes";
 
 import CallT "../../src/CallTypes";
 import CuT "../../src/CustodyTypes";
+import ST "../../src/SettlementTypes";
 
 import T "../../src/DeskTypes";
 import Can "../../src/DeskCanonical";
@@ -42,8 +43,21 @@ module {
   public let depot : CuT.Depot = { id = "DEPOT-CITI"; custodian = citi; place = "MCSD"; safekeepingAccount = "SAFE-001" };
   public let announcement : CuT.Announcement = { isin = "EG0000012345"; kind = #coupon({ perHundredMicro = 6_000_000 }); recordDate = 20700; exDate = 20699; paymentDate = 20702; source = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob };
 
+  public func venue() : ST.Venue { { core = bob(); deadlineSecs = 3600; recycleLimit = 3; claimsAccount = "1540" } };
+  public func instruction() : ST.Instruction { { deal = 40; leg = 0; cycle = 20672; role = #taker; counterparty = alice(); assetLedger = bob(); assetAmount = 10_000_000_00; cashLedger = alice(); cashAmount = 9_850_000_00; tradeId = ?7; reference = "security-1"; documentHash = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob } };
+
   public func samples() : [Freeze.Sample<T.Command>] {
     [
+      { family = "setSettlementVenue"; command = #setSettlementVenue({ venue = venue() }) },
+      { family = "setSettlementLedger"; command = #setSettlementLedger({ declaration = { role = #security({ isin = "EG0000012345" }); ledger = bob(); partial = true } }) },
+      { family = "openSettlementCycle"; command = #openSettlementCycle({ cycle = { businessDate = 20672; market = "EGX"; priceSource = "EGX closing" } }) },
+      { family = "instructSettlement"; command = #instructSettlement({ deal = 40; counterparty = alice(); tradeId = ?7; reference = "security-1" }) },
+      { family = "setInstructionTrade"; command = #setInstructionTrade({ instruction = 90; tradeId = 8 }) },
+      { family = "recycleSettlement"; command = #recycleSettlement({ instruction = 90; cycle = 20673 }) },
+      { family = "recordSettlementStatus"; command = #recordSettlementStatus({ instruction = 90; document = "<Document/>" : Blob }) },
+      { family = "buyIn"; command = #buyIn({ instruction = 90; counterparty = citi; priceMicro = 99_100_000; settlement = 20675; reference = "buy-in-1"; postingDate = 20673; valueDate = 20673; period = "2026-08"; narration = "buy-in" }) },
+      { family = "cancelSettlement"; command = #cancelSettlement({ instruction = 90; ourConsent = h(1); theirConsent = h(2); reason = "both parties agree" }) },
+      { family = "splitDeal"; command = #splitDeal({ deal = 40; parts = [6_000_000_00, 4_000_000_00] }) },
       { family = "setCustodyPolicy"; command = #setCustodyPolicy({ entitlementBasis = #contractual }) },
       { family = "extendInstrument"; command = #extendInstrument({ extension = { isin = "EG0000012345"; lei = "5493001KJTIIGC8Y1R12"; classification = #sovereign; market = "EGX"; settlementCycleDays = 2; quotation = #pricePer100; minDenomination = 100_00 } }) },
       { family = "openDepot"; command = #openDepot({ depot }) },
@@ -160,6 +174,27 @@ module {
       #custody(#entitlementPaid({ action = 70; lot = 40; amount = 60_000_00; nominal = 0; realised = -3; day = 20702 })),
       #custody(#paid({ action = 70; lots = 1; total = 60_000_00; day = 20702 })),
       #custody(#entitlementClaimed({ action = 70; lot = 40; amount = 60_000_00; accrued = 59_800_00; day = 20701 })),
+      #settlement(#venueSet(venue())),
+      #settlement(#ledgerSet({ role = #cash({ currency = "EGP" }); ledger = alice(); partial = false })),
+      #settlement(#cycleOpened({ cycle = { businessDate = 20672; market = "EGX"; priceSource = "EGX closing" }; day = 20670 })),
+      #settlement(#cycleClosed({ businessDate = 20672; settled = 3; failed = 1; pending = 0; day = 20672 })),
+      #settlement(#instructed({ instruction = instruction(); day = 20670 })),
+      #settlement(#tradeOpened({ instruction = 90; tradeId = 7; escrowed = true; note = "asset leg escrowed at ledger block 3"; day = 20670 })),
+      #settlement(#tradeVerified({ instruction = 90; tradeId = 7; day = 20670 })),
+      #settlement(#fundingRecorded({ instruction = 90; tradeId = 7; escrowed = true; bothEscrowed = false; note = ""; day = 20670 })),
+      #settlement(#callRefused({ instruction = 90; step = "fundTaker"; reason = "past funding deadline"; day = 20671 })),
+      #settlement(#auditSynced({ from = 2; leaves = [h(3), h(4)]; root = h(5); day = 20672 })),
+      #settlement(#receiptVerified({ instruction = 90; tradeId = 7; seq = 3; leaf = h(4); root = h(5); assetPaid = 10_000_000_00; cashPaid = 9_850_000_00; day = 20672 })),
+      #settlement(#settled({ instruction = 90; tradeId = 7; day = 20672 })),
+      #settlement(#failed({ instruction = 90; cause = "not settled by the close of cycle 20672"; fails = 1; day = 20672 })),
+      #settlement(#recycled({ instruction = 90; cycle = 20673; fails = 1; day = 20672 })),
+      #settlement(#reclaimed({ instruction = 90; tradeId = 7; note = "legB refund ok"; day = 20673 })),
+      #settlement(#tradeReset({ instruction = 90; previous = 7; day = 20673 })),
+      #settlement(#tradeAssigned({ instruction = 90; tradeId = 8; day = 20673 })),
+      #settlement(#boughtIn({ instruction = 90; replacement = 120; claim = 15_000_00; day = 20675 })),
+      #settlement(#cancelled({ instruction = 90; ourConsent = h(1); theirConsent = h(2); reason = "both parties agree"; day = 20675 })),
+      #settlement(#statusReceived({ instruction = 90; status = "SttlmSts/Pdg"; quantity = 10_000_000_00; amount = 9_850_000_00; matched = true; documentHash = h(6); day = 20671 })),
+      #settlement(#split({ deal = 40; parts = [6_000_000_00, 4_000_000_00]; day = 20670 })),
     ]
   };
 }

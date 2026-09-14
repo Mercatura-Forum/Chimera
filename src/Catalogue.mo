@@ -83,6 +83,17 @@ module {
       p("corporate.action.announce", "corporate", #create, #command("announceCorporateAction"), false, true),
       p("corporate.action.cancel", "corporate", #reverse, #command("cancelCorporateAction"), false, true),
       p("corporate.action.process", "corporate", #update, #command("processCorporateAction"), true, true),
+      // ── settlement through Tachyon ──
+      p("settlement.venue", "settlement", #update, #command("setSettlementVenue"), false, true),
+      p("settlement.ledger", "settlement", #update, #command("setSettlementLedger"), false, true),
+      p("settlement.cycle.open", "settlement", #create, #command("openSettlementCycle"), false, true),
+      p("settlement.instruct", "settlement", #create, #command("instructSettlement"), true, true),
+      p("settlement.trade.assign", "settlement", #update, #command("setInstructionTrade"), false, true),
+      p("settlement.recycle", "settlement", #update, #command("recycleSettlement"), false, true),
+      p("settlement.status.record", "settlement", #create, #command("recordSettlementStatus"), false, true),
+      p("settlement.buyin", "settlement", #update, #command("buyIn"), true, true),
+      p("settlement.cancel", "settlement", #update, #command("cancelSettlement"), true, true),
+      p("settlement.split", "settlement", #update, #command("splitDeal"), true, true),
       // ── treasury (Manticore's rows, verbatim) ──
       p("treasury.policy", "treasury", #update, #command("setTreasuryPolicy"), false, true),
       p("treasury.security.register", "treasury", #create, #command("registerSecurity"), false, true),
@@ -144,6 +155,16 @@ module {
       case (#announceCorporateAction(_)) "announceCorporateAction";
       case (#cancelCorporateAction(_)) "cancelCorporateAction";
       case (#processCorporateAction(_)) "processCorporateAction";
+      case (#setSettlementVenue(_)) "setSettlementVenue";
+      case (#setSettlementLedger(_)) "setSettlementLedger";
+      case (#openSettlementCycle(_)) "openSettlementCycle";
+      case (#instructSettlement(_)) "instructSettlement";
+      case (#setInstructionTrade(_)) "setInstructionTrade";
+      case (#recycleSettlement(_)) "recycleSettlement";
+      case (#recordSettlementStatus(_)) "recordSettlementStatus";
+      case (#buyIn(_)) "buyIn";
+      case (#cancelSettlement(_)) "cancelSettlement";
+      case (#splitDeal(_)) "splitDeal";
       case (#setTreasuryPolicy(_)) "setTreasuryPolicy";
       case (#registerSecurity(_)) "registerSecurity";
       case (#publishCurve(_)) "publishCurve";
@@ -170,6 +191,7 @@ module {
       "openEndOfDay", "setRetryPolicy", "resolveEndOfDayFailure", "clearAlert",
       "revaluePositions", "openCall", "resetCallRate", "adjustCallBalance", "serveCallNotice", "settleCall",
       "setCustodyPolicy", "extendInstrument", "openDepot", "setBookDepot", "assignDealDepot", "transferDepot", "announceCorporateAction", "cancelCorporateAction", "processCorporateAction",
+      "setSettlementVenue", "setSettlementLedger", "openSettlementCycle", "instructSettlement", "setInstructionTrade", "recycleSettlement", "recordSettlementStatus", "buyIn", "cancelSettlement", "splitDeal",
       "setTreasuryPolicy", "registerSecurity", "publishCurve", "setTreasuryLimit", "registerNostro", "captureDeal", "confirmDeal", "amendDeal", "cancelDeal",
       "settleDealLeg", "markDeal", "recordNostroStatement", "resolveNostroBreak",
     ]
@@ -186,6 +208,7 @@ module {
       ("expireProposals", "expiry is a fact of the clock; the block is attributed to the contract and the caller chooses nothing"),
       ("beginReplay", "a verification: the fold of the logs recomputed into the replay's own arena, which writes nothing the desk reads; the caller chooses nothing"),
       ("advanceReplay", "a verification step over the recorded blocks in order; the caller chooses nothing but how many"),
+      ("driveSettlement", "the next step of an instruction recorded through four eyes: the calls it makes are the instruction's, the outcome is Tachyon's, and the caller chooses nothing"),
     ]
   };
 

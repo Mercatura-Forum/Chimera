@@ -16,5 +16,17 @@
   "bytes": 81317,
   "url": "https://www.iso20022.org/sites/default/files/documents/messages/sese/schemas/sese.023.001.09.xsd",
   "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
+ },
+ "sese.024.001.09.xsd": {
+  "sha256": "b0577aa34ae2305938f8c6f46abcf67f12a38dab0a8837e57a852a30b32138e8",
+  "bytes": 64573,
+  "url": "https://www.iso20022.org/sites/default/files/documents/messages/sese/schemas/sese.024.001.09.xsd",
+  "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
+ },
+ "sese.025.001.09.xsd": {
+  "sha256": "e56b9c38a76aeb92354ab5b7105c1ebca5aa58ecfcdf0c125d40a4b7922462ec",
+  "bytes": 76544,
+  "url": "https://www.iso20022.org/sites/default/files/documents/messages/sese/schemas/sese.025.001.09.xsd",
+  "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
  }
 }
