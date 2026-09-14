@@ -1,0 +1,22 @@
+{
+ "description": "Fixture posting set for the accounting correctness oracle. Amounts are minor units (EGP piastres). Same set is rendered to hledger and beancount and their trial balances compared.",
+ "currency": "EGP",
+ "minor_units": 2,
+ "accounts": {
+  "Assets:Cash": "1000", "Assets:Loans:Customer1": "1200", "Assets:Nostro:CBE": "1100",
+  "Liabilities:Deposits:Customer1": "2000", "Liabilities:Deposits:Customer2": "2001", "Liabilities:InterestPayable": "2100",
+  "Equity:ShareCapital": "3000", "Income:Interest": "4000", "Income:Fees": "4100", "Expenses:InterestOnDeposits": "5000"
+ },
+ "postings": [
+  {"id":"P001","date":"2026-01-02","value_date":"2026-01-02","narration":"Capital injection","entries":[{"account":"Assets:Cash","debit":100000000},{"account":"Equity:ShareCapital","credit":100000000}]},
+  {"id":"P002","date":"2026-01-03","value_date":"2026-01-03","narration":"Customer1 deposit","entries":[{"account":"Assets:Cash","debit":5000000},{"account":"Liabilities:Deposits:Customer1","credit":5000000}]},
+  {"id":"P003","date":"2026-01-03","value_date":"2026-01-03","narration":"Customer2 deposit","entries":[{"account":"Assets:Cash","debit":1234567},{"account":"Liabilities:Deposits:Customer2","credit":1234567}]},
+  {"id":"P004","date":"2026-01-10","value_date":"2026-01-10","narration":"Loan disbursement to Customer1","entries":[{"account":"Assets:Loans:Customer1","debit":2000000},{"account":"Liabilities:Deposits:Customer1","credit":2000000}]},
+  {"id":"P005","date":"2026-01-15","value_date":"2026-01-15","narration":"Transfer deal capture to money market and FX with fee (three legs)","entries":[{"account":"Liabilities:Deposits:Customer1","debit":100150},{"account":"Liabilities:Deposits:Customer2","credit":100000},{"account":"Income:Fees","credit":150}]},
+  {"id":"P006","date":"2026-01-31","value_date":"2026-01-31","narration":"Loan interest accrual January","entries":[{"account":"Assets:Loans:Customer1","debit":16438},{"account":"Income:Interest","credit":16438}]},
+  {"id":"P007","date":"2026-01-31","value_date":"2026-01-31","narration":"Deposit interest accrual January","entries":[{"account":"Expenses:InterestOnDeposits","debit":8219},{"account":"Liabilities:InterestPayable","credit":8219}]},
+  {"id":"P008","date":"2026-02-01","value_date":"2026-01-31","narration":"Back-valued nostro funding (posting Feb, value Jan)","entries":[{"account":"Assets:Nostro:CBE","debit":30000000},{"account":"Assets:Cash","credit":30000000}]},
+  {"id":"P009","date":"2026-02-05","value_date":"2026-02-05","narration":"Reversal of P005 fee leg only (correction posting)","entries":[{"account":"Income:Fees","debit":150},{"account":"Liabilities:Deposits:Customer1","credit":150}]},
+  {"id":"P010","date":"2026-02-10","value_date":"2026-02-10","narration":"Zero-value posting (must be accepted and change nothing)","entries":[{"account":"Assets:Cash","debit":0},{"account":"Income:Fees","credit":0}]}
+ ]
+}

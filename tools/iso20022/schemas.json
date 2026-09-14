@@ -1,0 +1,20 @@
+{
+ "camt.053.001.08.xsd": {
+  "sha256": "338e9cb0c9989b5181802a7b773eece070d6815fc9d6483ac0579117bc24ccba",
+  "bytes": 106100,
+  "url": "https://www.iso20022.org/message/12736/download",
+  "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
+ },
+ "fxtr.014.001.04.xsd": {
+  "sha256": "9ec03b5238f2e7748f79afd064bb9298514a28e343c55f70b9967fb8de80a7fe",
+  "bytes": 27012,
+  "url": "https://www.iso20022.org/sites/default/files/documents/messages/fxtr/schemas/fxtr.014.001.04.xsd",
+  "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
+ },
+ "sese.023.001.09.xsd": {
+  "sha256": "015db3e0623f069e4abb6b6c79e6975bd223f7c71f575eda1adfb8d9e4d92443",
+  "bytes": 81317,
+  "url": "https://www.iso20022.org/sites/default/files/documents/messages/sese/schemas/sese.023.001.09.xsd",
+  "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
+ }
+}
