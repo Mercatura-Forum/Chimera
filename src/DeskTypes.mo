@@ -30,6 +30,7 @@ import FT "FinancingTypes";
 import VT "ValuationTypes";
 import CoT "CollateralTypes";
 import LT "LimitTypes";
+import RT "ReconciliationTypes";
 
 module {
 
@@ -152,6 +153,12 @@ module {
     #removeLimitNode : { node : LT.NodeId };
     #amendCounterparty : { counterparty : LT.Counterparty };
     #openRiskSweep : { sliceSize : Nat };
+    // ── reconciliation: intraday notifications, the custodian's statements, the breaks resolved ──
+    #setReconciliationPolicy : RT.Policy;
+    #recordNostroNotification : { nostro : TT.NostroId; document : Blob };
+    #recordDepotStatement : { depot : Text; document : Blob };
+    #resolveDepotBreak : { break_ : RT.BreakId; resolution : Text; correction : ?Nat };
+    #resolveCashBreak : { break_ : RT.BreakId; resolution : Text; correction : ?Nat };
     // ── treasury: the thirteen commands of Manticore's treasury domain, their bodies Manticore's ──
     #setTreasuryPolicy : TT.Policy;
     #registerSecurity : { terms : TT.SecurityTerms };
@@ -223,6 +230,7 @@ module {
     #valuation : VT.Event;
     #collateral : CoT.Event;
     #limits : LT.Event;
+    #reconciliation : RT.Event;
   };
 
   public type BatchError = {
@@ -298,6 +306,7 @@ module {
     #ValuationError : { error : VT.Error };
     #CollateralError : { error : CoT.Error };
     #LimitError : { error : LT.Error };
+    #ReconciliationError : { error : RT.Error };
     #MissingRate : { currency : Text; asOf : Day };
   };
 
@@ -397,6 +406,7 @@ module {
       case (#valuation(_)) "valuation";
       case (#collateral(_)) "collateral";
       case (#limits(_)) "limits";
+      case (#reconciliation(_)) "reconciliation";
     }
   };
 }

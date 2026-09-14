@@ -41,6 +41,7 @@ import FT "FinancingTypes";
 import VT "ValuationTypes";
 import CoT "CollateralTypes";
 import LT "LimitTypes";
+import RT "ReconciliationTypes";
 import TT "mo:manticore/TreasuryTypes";
 
 import T "DeskTypes";
@@ -434,6 +435,68 @@ module {
       case (_) null;
     }
   };
+
+  // ─── reconciliation ───
+  func wReconciliationPolicy(w : JC.Writer, p : RT.Policy) { w.len16(p.cashAccounts.size()); for (c in p.cashAccounts.vals()) { w.text(c.currency); wCash(w, c.cash) }; w.nat(p.breakAgeAlertDays) };
+  func rReconciliationPolicy(r : JC.Reader) : ?RT.Policy {
+    let ?n = r.len16() else return null; if (n > 64) return null;
+    let out = List.empty<RT.CashAccount>(); var i = 0;
+    while (i < n) { let ?currency = r.text() else return null; let ?cash = rCash(r) else return null; List.add(out, { currency; cash }); i += 1 };
+    let ?breakAgeAlertDays = r.nat() else return null;
+    ?{ cashAccounts = List.toArray(out); breakAgeAlertDays }
+  };
+  func wStatementKind(w : JC.Writer, k : RT.StatementKind) { w.byte(switch (k) { case (#holdings) 1; case (#transactions) 2 }) };
+  func rStatementKind(r : JC.Reader) : ?RT.StatementKind { switch (r.byte()) { case (?1) ?#holdings; case (?2) ?#transactions; case (_) null } };
+  func wBreakKind(w : JC.Writer, k : RT.BreakKind) { w.byte(switch (k) { case (#position) 1; case (#transaction) 2 }) };
+  func rBreakKind(r : JC.Reader) : ?RT.BreakKind { switch (r.byte()) { case (?1) ?#position; case (?2) ?#transaction; case (_) null } };
+  func wSide(w : JC.Writer, x : RT.BreakSide) { w.byte(switch (x) { case (#onStatementOnly) 1; case (#inOurBooksOnly) 2 }) };
+  func rSide(r : JC.Reader) : ?RT.BreakSide { switch (r.byte()) { case (?1) ?#onStatementOnly; case (?2) ?#inOurBooksOnly; case (_) null } };
+  func wReconciliationEvent(w : JC.Writer, e : RT.Event) {
+    switch (e) {
+      case (#policySet(p)) { w.byte(0x01); wReconciliationPolicy(w, p) };
+      case (#notificationRecorded(x)) { w.byte(0x02); w.text(x.nostro); w.blob(x.notification); w.nat(x.entries); w.len16(x.matched.size()); for ((en, posting) in x.matched.vals()) { TyCan.writeEntries(w, [en]); w.nat(posting) }; w.nat(x.unmatched); w.nat(x.day) };
+      case (#statementEntriesNotified(x)) { w.byte(0x03); w.text(x.nostro); w.blob(x.statement); w.nat(x.entries); w.nat(x.day) };
+      case (#depotStatementRecorded(x)) { w.byte(0x04); w.text(x.depot); w.blob(x.statement); wStatementKind(w, x.kind); w.nat(x.statementDate); w.nat(x.from); w.nat(x.to); w.nat(x.reported); w.nat(x.matched); w.nat(x.explained); w.nat(x.breaks); w.nat(x.day) };
+      case (#depotBreak(x)) { w.byte(0x05); w.text(x.depot); w.blob(x.statement); wBreakKind(w, x.kind); wSide(w, x.side); w.text(x.isin); w.nat(x.ours); w.nat(x.theirs); w.text(x.reference); w.optNat(x.instruction); w.nat(x.day) };
+      case (#breakExplainedByFail(x)) { w.byte(0x06); w.text(x.depot); w.blob(x.statement); w.text(x.isin); w.text(x.reference); w.nat(x.instruction); w.nat(x.nominal); w.nat(x.day) };
+      case (#depotBreakAged(x)) { w.byte(0x07); w.nat(x.break_); w.nat(x.ageDays); w.nat(x.day) };
+      case (#depotBreakResolved(x)) { w.byte(0x08); w.nat(x.break_); w.text(x.resolution); w.optNat(x.correction); w.nat(x.day) };
+      case (#cashReconciliationIntended(x)) { w.byte(0x09); w.text(x.currency); w.principal(x.ledger); w.nat(x.day) };
+      case (#cashReconciled(x)) { w.byte(0x0A); w.text(x.currency); w.principal(x.ledger); w.nat(x.ledgerBalance); wInt(w, x.bookBalance); wInt(w, x.difference); w.optNat(x.tipHeight); w.nat(x.day) };
+      case (#cashReconciliationFailed(x)) { w.byte(0x0B); w.text(x.currency); w.principal(x.ledger); w.text(x.reason); w.nat(x.day) };
+      case (#cashBreak(x)) { w.byte(0x0C); w.text(x.currency); w.principal(x.ledger); w.nat(x.ledgerBalance); wInt(w, x.bookBalance); wInt(w, x.difference); w.nat(x.day) };
+      case (#cashBreakAged(x)) { w.byte(0x0F); w.nat(x.break_); w.nat(x.ageDays); w.nat(x.day) };
+      case (#cashBreakCleared(x)) { w.byte(0x0D); w.nat(x.break_); w.nat(x.day) };
+      case (#cashBreakResolved(x)) { w.byte(0x0E); w.nat(x.break_); w.text(x.resolution); w.optNat(x.correction); w.nat(x.day) };
+    }
+  };
+  func rReconciliationEvent(r : JC.Reader) : ?RT.Event {
+    switch (r.byte()) {
+      case (?0x01) { let ?p = rReconciliationPolicy(r) else return null; ?#policySet(p) };
+      case (?0x02) {
+        let ?nostro = r.text() else return null; let ?notification = r.blob() else return null; let ?entries = r.nat() else return null;
+        let ?n = r.len16() else return null; if (n > 10_000) return null;
+        let matched = List.empty<(TT.StatementEntry, Nat)>(); var i = 0;
+        while (i < n) { let ?es = TyCan.readEntries(r) else return null; if (es.size() != 1) return null; let ?posting = r.nat() else return null; List.add(matched, (es[0], posting)); i += 1 };
+        let ?unmatched = r.nat() else return null; let ?day = r.nat() else return null;
+        ?#notificationRecorded({ nostro; notification; entries; matched = List.toArray(matched); unmatched; day })
+      };
+      case (?0x03) { let ?nostro = r.text() else return null; let ?statement = r.blob() else return null; let ?entries = r.nat() else return null; let ?day = r.nat() else return null; ?#statementEntriesNotified({ nostro; statement; entries; day }) };
+      case (?0x04) { let ?depot = r.text() else return null; let ?statement = r.blob() else return null; let ?kind = rStatementKind(r) else return null; let ?statementDate = r.nat() else return null; let ?from = r.nat() else return null; let ?to = r.nat() else return null; let ?reported = r.nat() else return null; let ?matched = r.nat() else return null; let ?explained = r.nat() else return null; let ?breaks = r.nat() else return null; let ?day = r.nat() else return null; ?#depotStatementRecorded({ depot; statement; kind; statementDate; from; to; reported; matched; explained; breaks; day }) };
+      case (?0x05) { let ?depot = r.text() else return null; let ?statement = r.blob() else return null; let ?kind = rBreakKind(r) else return null; let ?side = rSide(r) else return null; let ?isin = r.text() else return null; let ?ours = r.nat() else return null; let ?theirs = r.nat() else return null; let ?reference = r.text() else return null; let ?instruction = r.optNat() else return null; let ?day = r.nat() else return null; ?#depotBreak({ depot; statement; kind; side; isin; ours; theirs; reference; instruction; day }) };
+      case (?0x06) { let ?depot = r.text() else return null; let ?statement = r.blob() else return null; let ?isin = r.text() else return null; let ?reference = r.text() else return null; let ?instruction = r.nat() else return null; let ?nominal = r.nat() else return null; let ?day = r.nat() else return null; ?#breakExplainedByFail({ depot; statement; isin; reference; instruction; nominal; day }) };
+      case (?0x07) { let ?break_ = r.nat() else return null; let ?ageDays = r.nat() else return null; let ?day = r.nat() else return null; ?#depotBreakAged({ break_; ageDays; day }) };
+      case (?0x08) { let ?break_ = r.nat() else return null; let ?resolution = r.text() else return null; let ?correction = r.optNat() else return null; let ?day = r.nat() else return null; ?#depotBreakResolved({ break_; resolution; correction; day }) };
+      case (?0x09) { let ?currency = r.text() else return null; let ?ledger = r.principal() else return null; let ?day = r.nat() else return null; ?#cashReconciliationIntended({ currency; ledger; day }) };
+      case (?0x0A) { let ?currency = r.text() else return null; let ?ledger = r.principal() else return null; let ?ledgerBalance = r.nat() else return null; let ?bookBalance = rInt(r) else return null; let ?difference = rInt(r) else return null; let ?tipHeight = r.optNat() else return null; let ?day = r.nat() else return null; ?#cashReconciled({ currency; ledger; ledgerBalance; bookBalance; difference; tipHeight; day }) };
+      case (?0x0B) { let ?currency = r.text() else return null; let ?ledger = r.principal() else return null; let ?reason = r.text() else return null; let ?day = r.nat() else return null; ?#cashReconciliationFailed({ currency; ledger; reason; day }) };
+      case (?0x0C) { let ?currency = r.text() else return null; let ?ledger = r.principal() else return null; let ?ledgerBalance = r.nat() else return null; let ?bookBalance = rInt(r) else return null; let ?difference = rInt(r) else return null; let ?day = r.nat() else return null; ?#cashBreak({ currency; ledger; ledgerBalance; bookBalance; difference; day }) };
+      case (?0x0D) { let ?break_ = r.nat() else return null; let ?day = r.nat() else return null; ?#cashBreakCleared({ break_; day }) };
+      case (?0x0F) { let ?break_ = r.nat() else return null; let ?ageDays = r.nat() else return null; let ?day = r.nat() else return null; ?#cashBreakAged({ break_; ageDays; day }) };
+      case (?0x0E) { let ?break_ = r.nat() else return null; let ?resolution = r.text() else return null; let ?correction = r.optNat() else return null; let ?day = r.nat() else return null; ?#cashBreakResolved({ break_; resolution; correction; day }) };
+      case (_) null;
+    }
+  };
   func wPayer(w : JC.Writer, p : FT.MarginPayer) { w.byte(switch (p) { case (#desk) 1; case (#counterparty) 2 }) };
   func rPayer(r : JC.Reader) : ?FT.MarginPayer { switch (r.byte()) { case (?1) ?#desk; case (?2) ?#counterparty; case (_) null } };
   func wFinancingEvent(w : JC.Writer, e : FT.Event) {
@@ -636,6 +699,11 @@ module {
       case (#removeLimitNode(x)) { w.byte(0xA1); w.text(x.node) };
       case (#amendCounterparty(x)) { w.byte(0xA2); w.text(x.counterparty.name); w.text(x.counterparty.group); w.text(x.counterparty.country) };
       case (#openRiskSweep(x)) { w.byte(0xA3); w.nat(x.sliceSize) };
+      case (#setReconciliationPolicy(p)) { w.byte(0xB0); wReconciliationPolicy(w, p) };
+      case (#recordNostroNotification(x)) { w.byte(0xB1); w.text(x.nostro); w.blob(x.document) };
+      case (#recordDepotStatement(x)) { w.byte(0xB2); w.text(x.depot); w.blob(x.document) };
+      case (#resolveDepotBreak(x)) { w.byte(0xB3); w.nat(x.break_); w.text(x.resolution); w.optNat(x.correction) };
+      case (#resolveCashBreak(x)) { w.byte(0xB4); w.nat(x.break_); w.text(x.resolution); w.optNat(x.correction) };
       case (#setTreasuryPolicy(p)) { w.byte(0x20); TyCan.writePolicy(w, p) };
       case (#registerSecurity(x)) { w.byte(0x21); TyCan.writeSecurityTerms(w, x.terms) };
       case (#publishCurve(x)) { w.byte(0x22); TyCan.writeCurve(w, x.curve) };
@@ -745,6 +813,11 @@ module {
       case 0xA1 { let ?node = r.text() else return null; ?#removeLimitNode({ node }) };
       case 0xA2 { let ?name = r.text() else return null; let ?group = r.text() else return null; let ?country = r.text() else return null; ?#amendCounterparty({ counterparty = { name; group; country } }) };
       case 0xA3 { let ?sliceSize = r.nat() else return null; ?#openRiskSweep({ sliceSize }) };
+      case 0xB0 { let ?p = rReconciliationPolicy(r) else return null; ?#setReconciliationPolicy(p) };
+      case 0xB1 { let ?nostro = r.text() else return null; let ?document = r.blob() else return null; ?#recordNostroNotification({ nostro; document }) };
+      case 0xB2 { let ?depot = r.text() else return null; let ?document = r.blob() else return null; ?#recordDepotStatement({ depot; document }) };
+      case 0xB3 { let ?break_ = r.nat() else return null; let ?resolution = r.text() else return null; let ?correction = r.optNat() else return null; ?#resolveDepotBreak({ break_; resolution; correction }) };
+      case 0xB4 { let ?break_ = r.nat() else return null; let ?resolution = r.text() else return null; let ?correction = r.optNat() else return null; ?#resolveCashBreak({ break_; resolution; correction }) };
       case 0x79 { let ?family = rFamily(r) else return null; let ?id = r.nat() else return null; let ?leg = r.nat() else return null; let ?counterparty = r.principal() else return null; let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; ?#instructFinancing({ family; id; leg; counterparty; tradeId; reference }) };
       case 0x20 { let ?p = TyCan.readPolicy(r) else return null; ?#setTreasuryPolicy(p) };
       case 0x21 { let ?terms = TyCan.readSecurityTerms(r) else return null; ?#registerSecurity({ terms }) };
@@ -946,6 +1019,7 @@ module {
       case (#valuation(ve)) { w.byte(0x64); wValuationEvent(w, ve) };
       case (#collateral(ce)) { w.byte(0x65); wCollateralEvent(w, ce) };
       case (#limits(le)) { w.byte(0x66); wLimitEvent(w, le) };
+      case (#reconciliation(re)) { w.byte(0x67); wReconciliationEvent(w, re) };
     }
   };
 
@@ -996,6 +1070,7 @@ module {
       case 0x64 { let ?ve = rValuationEvent(r) else return null; ?#valuation(ve) };
       case 0x65 { let ?ce = rCollateralEvent(r) else return null; ?#collateral(ce) };
       case 0x66 { let ?le = rLimitEvent(r) else return null; ?#limits(le) };
+      case 0x67 { let ?re = rReconciliationEvent(r) else return null; ?#reconciliation(re) };
       case _ null;
     };
     switch (out) {

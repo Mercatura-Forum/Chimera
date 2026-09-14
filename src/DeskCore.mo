@@ -65,6 +65,9 @@ import CoT "CollateralTypes";
 import CollateralCore "CollateralCore";
 import LT "LimitTypes";
 import LimitCore "LimitCore";
+import RT "ReconciliationTypes";
+import ReconciliationCore "ReconciliationCore";
+import ReconciliationMessages "ReconciliationMessages";
 import Shard "mo:kernel/sweep/Shard";
 import R "mo:kernel/rows/StableRows";
 import Map "mo:core/Map";
@@ -94,6 +97,7 @@ module {
     attribution : Attribution.State;
     collateral : CollateralCore.State;
     limits : LimitCore.State;
+    reconciliation : ReconciliationCore.State;
   };
 
   public func newState(installer : Principal) : State { newStateIn(installer, RI.newArena()) };
@@ -115,6 +119,7 @@ module {
       attribution = Attribution.newState(arena);
       collateral = CollateralCore.newState(arena);
       limits = LimitCore.newState(arena);
+      reconciliation = ReconciliationCore.newState(arena);
     }
   };
 
@@ -708,6 +713,120 @@ module {
       };
     };
     #ok({ day; family = "done"; visited = 0; familyDone = true; published = true; blocks = List.toArray(acc.blocks); postings = List.toArray(acc.postings) })
+  };
+
+  // ─── reconciliation ─────────────────────────────────────────────────────────
+
+  func reconErr<X>(e : RT.Error) : Res<X> { #err(#ReconciliationError({ error = e })) };
+  /// The depot's positions by instrument: the desk's own lots and the collateral held for counterparties, which
+  /// the custodian holds in the same safekeeping account.
+  public func depotPositions(s : State, depot : Text) : [(Text, Nat)] {
+    let sums = Map.empty<Text, Nat>();
+    for (h in CustodyCore.holdingsOf(s.custody, depot, func(lot : Nat) : (Text, Text) { switch (TreasuryCore.row(s.treasury, lot)) { case (?r) (r.isin, r.book); case null ("", "") } }).vals()) {
+      let cur = switch (Map.get(sums, Text.compare, h.isin)) { case (?v) v; case null 0 };
+      Map.add(sums, Text.compare, h.isin, cur + h.nominal);
+    };
+    let h = CustodyCore.hash8(depot);
+    let (lo, hi) = R.fullRange(20);
+    var cursor : ?Blob = null;
+    label walk loop {
+      let page = RI.range(s.custody.received, lo, hi, cursor, 512);
+      for ((k, v) in page.entries.vals()) {
+        let a = Blob.toArray(k);
+        if (R.getNat(a, 12, 8) == h) { let isin = R.getText(a, 0, 12); let n = R.getNat(Blob.toArray(v), 0, 8); let cur = switch (Map.get(sums, Text.compare, isin)) { case (?x) x; case null 0 }; Map.add(sums, Text.compare, isin, cur + n) };
+      };
+      switch (page.cursor) { case null break walk; case (?c) cursor := ?c };
+    };
+    Map.toArray(sums)
+  };
+  /// The depot and the instrument of an instruction, by its family.
+  func instructionDepotIsin(s : State, i : SettlementCore.InstructionRow) : ?(Text, Text) {
+    switch (i.family) {
+      case (#treasury) {
+        let ?r = TreasuryCore.row(s.treasury, i.deal) else return null;
+        let depot = switch (CustodyCore.dealDepotOf(s.custody, i.deal)) { case (?d) d; case null { switch (CustodyCore.bookDepotOf(s.custody, r.book)) { case (?d) d; case null return null } } };
+        ?(depot, r.isin)
+      };
+      case (#repo) { switch (FinancingCore.repo(s.financing, i.deal)) { case (?r) ?(r.depot, r.isin); case null null } };
+      case (#loan) { switch (FinancingCore.loan(s.financing, i.deal)) { case (?l) ?(l.depot, l.isin); case null null } };
+      case (#collateral) { switch (CollateralCore.securitiesRow(s.collateral, i.deal)) { case (?r) ?(r.depot, r.isin); case null null } };
+    }
+  };
+  /// The desk's instructions of a depot with a cycle in a window, as the custodian's transaction report is
+  /// matched against them; with them, the instructions that failed in the window and were recycled into the
+  /// business day after it, which the custodian did not post and the fail explains.
+  public func depotInstructions(s : State, js : JCore.State, depot : Text, from : Nat, to : Nat) : [ReconciliationCore.DeskInstruction] {
+    let out = List.empty<ReconciliationCore.DeskInstruction>();
+    func take(i : SettlementCore.InstructionRow, failedOnly : Bool) {
+      let failed = i.state == #failed or (i.fails > 0 and i.state != #settled);
+      if (failedOnly and not failed) return;
+      switch (instructionDepotIsin(s, i)) {
+        case (?(dep, isin)) { if (Text.equal(dep, depot)) List.add(out, { id = i.id; referenceHash = i.referenceHash; isin; nominal = i.assetAmount; delivered = i.role == #maker; settled = i.state == #settled; failed; day = i.cycle }) };
+        case null {};
+      };
+    };
+    var d = from;
+    while (d <= to) { for (i in SettlementCore.instructionsOfCycle(s.settlement, d).vals()) take(i, false); d += 1 };
+    for (i in SettlementCore.instructionsOfCycle(s.settlement, nextBusinessDay(js)(to + 1)).vals()) take(i, true);
+    List.toArray(out)
+  };
+  public func bookCashBalance(js : JCore.State, cash : TT.CashAccount, currency : Text, day : Nat) : Int {
+    let v = JCore.valueDatedBalance(js, cash.account, TreasuryCore.cashSub(cash), currency, day);
+    (v.debits : Int) - v.credits
+  };
+  /// What a cash reconciliation needs before its call: the policy's account for the currency, the ledger the
+  /// venue settles the currency on, and no reconciliation of the currency in flight.
+  public func prepareCashReconciliation(s : State, js : JCore.State, now : Nat64, currency : Text) : Res<{ ledger : Principal; cash : TT.CashAccount; event : T.Event }> {
+    let ?p = ReconciliationCore.policy(s.reconciliation) else return reconErr(#NoPolicy);
+    let ?cash = ReconciliationCore.cashAccountOf(p, currency) else return reconErr(#NoCashAccount({ currency }));
+    let ?decl = SettlementCore.ledger(s.settlement, #cash({ currency })) else return reconErr(#NoLedger({ currency }));
+    switch (ReconciliationCore.cashRow(s.reconciliation, currency)) { case (?r) { if (r.inFlight) return reconErr(#ReconciliationInFlight({ currency })) }; case null {} };
+    let day = JCore.effectiveToday(js, now);
+    #ok({ ledger = decl.ledger; cash; event = #reconciliation(#cashReconciliationIntended({ currency; ledger = decl.ledger; day })) })
+  };
+  /// The ledger's reply folded against the book: the reconciliation recorded with the log height beside the balance; a
+  /// difference opens a break when none stands, an agreement clears the standing one.
+  public func completeCashReconciliation(s : State, js : JCore.State, now : Nat64, currency : Text, ledger : Principal, cash : TT.CashAccount, ledgerBalance : Nat, tipHeight : ?Nat) : [T.Event] {
+    let day = JCore.effectiveToday(js, now);
+    let book = bookCashBalance(js, cash, currency, day);
+    let difference : Int = (ledgerBalance : Int) - book;
+    let out = List.empty<T.Event>();
+    List.add(out, #reconciliation(#cashReconciled({ currency; ledger; ledgerBalance; bookBalance = book; difference; tipHeight; day })));
+    let standing = switch (ReconciliationCore.cashRow(s.reconciliation, currency)) { case (?r) r.openBreak; case null 0 };
+    if (difference != 0 and standing == 0) List.add(out, #reconciliation(#cashBreak({ currency; ledger; ledgerBalance; bookBalance = book; difference; day })))
+    else if (difference == 0 and standing != 0) List.add(out, #reconciliation(#cashBreakCleared({ break_ = standing; day })));
+    List.toArray(out)
+  };
+  /// The reconciliation report of a day: the nostro, depot and cash breaks open by age band, the statements and
+  /// notifications recorded, the last cash reconciliation per currency; canonical text, hashed, at the height.
+  public func reconciliationReport(s : State, day : Nat) : { height : Nat; day : Nat; json : Text; hash : Blob } {
+    func band(age : Nat) : Text { if (age <= 2) "0-2" else if (age <= 5) "3-5" else "6+" };
+    func ageOf(opened : Nat) : Nat { if (day > opened) day - opened else 0 };
+    func bands(ages : [Nat]) : Text {
+      var a = 0; var b = 0; var c = 0;
+      for (x in ages.vals()) { switch (band(x)) { case "0-2" a += 1; case "3-5" b += 1; case (_) c += 1 } };
+      "{\"0-2\":" # Nat.toText(a) # ",\"3-5\":" # Nat.toText(b) # ",\"6+\":" # Nat.toText(c) # ",\"open\":" # Nat.toText(ages.size()) # "}"
+    };
+    func q(t : Text) : Text { "\"" # t # "\"" };
+    func int(i : Int) : Text { (if (i < 0) "-" else "") # Nat.toText(Int.abs(i)) };
+    let nostroAges = Array.map<TreasuryCore.BreakRow, Nat>(TreasuryCore.openBreaks(s.treasury), func(b) { ageOf(b.openedDay) });
+    let depotAges = Array.map<ReconciliationCore.DepotBreakRow, Nat>(ReconciliationCore.openDepotBreaks(s.reconciliation), func(b) { ageOf(b.openedDay) });
+    let cashAges = Array.map<ReconciliationCore.CashBreakRow, Nat>(ReconciliationCore.openCashBreaks(s.reconciliation), func(b) { ageOf(b.openedDay) });
+    let ts = TreasuryCore.status(s.treasury);
+    let rs = ReconciliationCore.status(s.reconciliation);
+    var depots = "";
+    for (st in ReconciliationCore.statements(s.reconciliation).vals()) {
+      depots #= (if (depots.size() > 0) "," else "") # "{\"depot\":" # q(st.depot) # ",\"kind\":" # q(RT.statementKindText(st.kind)) # ",\"date\":" # Nat.toText(st.statementDate) # ",\"reported\":" # Nat.toText(st.reported) # ",\"matched\":" # Nat.toText(st.matched) # ",\"explained\":" # Nat.toText(st.explained) # ",\"breaks\":" # Nat.toText(st.breaks) # "}";
+    };
+    var cash = "";
+    for (c in ReconciliationCore.cashRows(s.reconciliation).vals()) {
+      cash #= (if (cash.size() > 0) "," else "") # "{\"currency\":" # q(c.currency) # ",\"day\":" # Nat.toText(c.day) # ",\"ledger\":" # Nat.toText(c.ledgerBalance) # ",\"book\":" # int(c.bookBalance) # ",\"difference\":" # int(c.difference) # ",\"openBreak\":" # Nat.toText(c.openBreak) # "}";
+    };
+    let json = "{\"report\":\"reconciliation\",\"version\":1,\"day\":" # Nat.toText(day) # ",\"height\":" # Nat.toText(s.height)
+      # ",\"nostro\":{\"statements\":" # Nat.toText(ts.statements) # ",\"notifications\":" # Nat.toText(rs.notifications) # ",\"breaksTotal\":" # Nat.toText(ts.breaksTotal) # ",\"breaks\":" # bands(nostroAges) # "}"
+      # ",\"depot\":{\"statements\":[" # depots # "],\"explainedFails\":" # Nat.toText(rs.explainedFails) # ",\"breaksTotal\":" # Nat.toText(rs.depotBreaks) # ",\"breaks\":" # bands(depotAges) # "}"
+      # ",\"cash\":{\"reconciliations\":" # Nat.toText(rs.cashReconciliations) # ",\"accounts\":[" # cash # "],\"breaksTotal\":" # Nat.toText(rs.cashBreaks) # ",\"breaks\":" # bands(cashAges) # "}}";
+    { height = s.height; day; json; hash = Sha256.fromBlob(#sha256, Text.encodeUtf8(json)) }
   };
 
   /// The functional currency, the recorded spot rates and the position pairs of the close, the recorded fixings,
@@ -1720,6 +1839,75 @@ module {
         for (r in Eod.listRuns(s.eod).vals()) { if (Eod.isOpen(r)) return limitErr(#RunOpen({ book = r.book; businessDate = r.businessDate })) };
         switch (LimitCore.planOpenSweep(s.limits, today, s.height, x.sliceSize)) { case (#err(e)) limitErr(e); case (#ok(ev)) only(#limits(ev)) }
       };
+      // ── reconciliation ──
+      case (#setReconciliationPolicy(pol)) {
+        for (c in pol.cashAccounts.vals()) { switch (requirePostableAccount(js, "settlement cash", c.cash.account)) { case (?e) return #err(e); case null {} } };
+        switch (ReconciliationCore.planPolicy(pol)) { case (#err(e)) reconErr(e); case (#ok(ev)) only(#reconciliation(ev)) }
+      };
+      case (#recordNostroNotification(x)) {
+        let ?nr = TreasuryCore.nostro(s.treasury, x.nostro) else return treasuryErr(#UnknownNostro({ nostro = x.nostro }));
+        let mu : Nat8 = switch (minorUnitsOf(js, nr.currency)) { case (?m) m; case null 2 };
+        let parsed = switch (ReconciliationMessages.parseCamt054(x.document, nr.currency, mu)) { case (#ok(p)) p; case (#err(reason)) return reconErr(#BadDocument({ reason })) };
+        let hash = Sha256.fromBlob(#sha256, x.document);
+        if (TreasuryCore.statementKnown(s.treasury, hash) or ReconciliationCore.notification(s.reconciliation, hash) != null) return reconErr(#StatementKnown({ statement = hash }));
+        if (parsed.entries.size() == 0) return reconErr(#BadDocument({ reason = "a notification carries at least one entry" }));
+        if (parsed.entries.size() > ReconciliationCore.MAX_ENTRIES) return reconErr(#BadDocument({ reason = "at most " # Nat.toText(ReconciliationCore.MAX_ENTRIES) # " entries" }));
+        var lo = parsed.entries[0].valueDay; var hi = lo;
+        for (e in parsed.entries.vals()) { if (e.amount == 0) return reconErr(#BadDocument({ reason = "an entry's amount is positive" })); if (e.valueDay > today) return reconErr(#BadDocument({ reason = "an entry's value day is not after today" })); if (e.valueDay < lo) lo := e.valueDay; if (e.valueDay > hi) hi := e.valueDay };
+        let legs = TreasuryCore.nostroLegsIn(s.treasury, nr.accountHash, if (lo > nr.tolerance) lo - nr.tolerance else 0, hi + nr.tolerance);
+        let m = ReconciliationCore.matchNotification(parsed.entries, legs, nr.tolerance);
+        let matched = Array.map<(Nat, Nat), (TT.StatementEntry, Nat)>(m.matches, func((e, posting)) { (parsed.entries[e], posting) });
+        let extras = List.empty<T.Event>();
+        List.add(extras, #reconciliation(#notificationRecorded({ nostro = x.nostro; notification = hash; entries = parsed.entries.size(); matched; unmatched = m.unmatched.size(); day = today })));
+        // the matched legs are marked through Manticore's own statement event, with no breaks: the statement of the day decides the rest
+        if (m.matches.size() > 0) List.add(extras, #treasury(#statementRecorded({ nostro = x.nostro; statement = hash; from = lo; to = hi; entries = parsed.entries.size(); matches = Array.map<(Nat, Nat), Nat>(m.matches, func((_, p)) { p }); breaks = 0; day = today })));
+        #ok({ event = ?#journalMark({ height = JCore.height(js) }); extra = List.toArray(extras); journal = [] })
+      };
+      case (#recordDepotStatement(x)) {
+        let ?depot = CustodyCore.depot(s.custody, x.depot) else return custodyErr(#UnknownDepot({ depot = x.depot }));
+        let hash = Sha256.fromBlob(#sha256, x.document);
+        if (ReconciliationCore.statement(s.reconciliation, hash) != null) return reconErr(#StatementKnown({ statement = hash }));
+        let ?kind = ReconciliationMessages.depotDocumentKind(x.document) else return reconErr(#BadDocument({ reason = "the document is a semt.002 holdings report or a semt.017 transaction posting report" }));
+        let mu : Nat8 = 2;
+        let extras = List.empty<T.Event>();
+        switch (kind) {
+          case (#holdings) {
+            let parsed = switch (ReconciliationMessages.parseSemt002(x.document, mu)) { case (#ok(p)) p; case (#err(reason)) return reconErr(#BadDocument({ reason })) };
+            if (not Text.equal(parsed.account, depot.safekeepingAccount)) return reconErr(#WrongAccount({ depot = x.depot; expected = depot.safekeepingAccount; got = parsed.account }));
+            if (parsed.holdings.size() > ReconciliationCore.MAX_REPORTED) return reconErr(#BadDocument({ reason = "at most " # Nat.toText(ReconciliationCore.MAX_REPORTED) # " balances" }));
+            if (parsed.statementDate > today) return reconErr(#BadDocument({ reason = "the statement date is not after today" }));
+            let m = ReconciliationCore.matchHoldings(parsed.holdings, depotPositions(s, x.depot));
+            List.add(extras, #reconciliation(#depotStatementRecorded({ depot = x.depot; statement = hash; kind = #holdings; statementDate = parsed.statementDate; from = parsed.statementDate; to = parsed.statementDate; reported = parsed.holdings.size(); matched = m.matched; explained = 0; breaks = m.breaks.size(); day = today })));
+            for ((isin, ours, theirs, side) in m.breaks.vals()) List.add(extras, #reconciliation(#depotBreak({ depot = x.depot; statement = hash; kind = #position; side; isin; ours; theirs; reference = ""; instruction = null; day = today })));
+          };
+          case (#transactions) {
+            let parsed = switch (ReconciliationMessages.parseSemt017(x.document, mu)) { case (#ok(p)) p; case (#err(reason)) return reconErr(#BadDocument({ reason })) };
+            if (not Text.equal(parsed.account, depot.safekeepingAccount)) return reconErr(#WrongAccount({ depot = x.depot; expected = depot.safekeepingAccount; got = parsed.account }));
+            if (parsed.transactions.size() > ReconciliationCore.MAX_REPORTED) return reconErr(#BadDocument({ reason = "at most " # Nat.toText(ReconciliationCore.MAX_REPORTED) # " postings" }));
+            if (parsed.to > today) return reconErr(#BadDocument({ reason = "the period ends on or before today" }));
+            if (parsed.to > parsed.from + 31) return reconErr(#BadDocument({ reason = "the period spans at most 31 days" }));
+            let m = ReconciliationCore.matchTransactions(parsed.transactions, depotInstructions(s, js, x.depot, parsed.from, parsed.to));
+            List.add(extras, #reconciliation(#depotStatementRecorded({ depot = x.depot; statement = hash; kind = #transactions; statementDate = parsed.to; from = parsed.from; to = parsed.to; reported = parsed.transactions.size(); matched = m.matched.size(); explained = m.explained.size(); breaks = m.breaks.size(); day = today })));
+            for (iid in m.explained.vals()) {
+              switch (SettlementCore.instruction(s.settlement, iid)) {
+                case (?i) { let (_, isin) = switch (instructionDepotIsin(s, i)) { case (?v) v; case null ("", "") }; List.add(extras, #reconciliation(#breakExplainedByFail({ depot = x.depot; statement = hash; isin; reference = ""; instruction = iid; nominal = i.assetAmount; day = today }))) };
+                case null {};
+              };
+            };
+            for ((side, isin, ours, theirs, reference, instruction) in m.breaks.vals()) List.add(extras, #reconciliation(#depotBreak({ depot = x.depot; statement = hash; kind = #transaction; side; isin; ours; theirs; reference; instruction; day = today })));
+          };
+        };
+        let all = List.toArray(extras);
+        #ok({ event = ?all[0]; extra = Array.sliceToArray<T.Event>(all, 1, all.size()); journal = [] })
+      };
+      case (#resolveDepotBreak(x)) {
+        switch (x.correction) { case (?c) { if (c >= s.height) return reconErr(#BadDocument({ reason = "the correction names a recorded block" })) }; case null {} };
+        switch (ReconciliationCore.planResolveDepotBreak(s.reconciliation, x.break_, x.resolution, x.correction, today)) { case (#err(e)) reconErr(e); case (#ok(ev)) only(#reconciliation(ev)) }
+      };
+      case (#resolveCashBreak(x)) {
+        switch (x.correction) { case (?c) { if (c >= s.height) return reconErr(#BadDocument({ reason = "the correction names a recorded block" })) }; case null {} };
+        switch (ReconciliationCore.planResolveCashBreak(s.reconciliation, x.break_, x.resolution, x.correction, today)) { case (#err(e)) reconErr(e); case (#ok(ev)) only(#reconciliation(ev)) }
+      };
       // ── treasury: Manticore's planners with the desk's context ──
       case (#setTreasuryPolicy(pol)) {
         for (code in TreasuryCore.accountsOf(pol).vals()) { switch (JCore.getAccount(js, code)) { case null return #err(#UnknownAccount({ role = "treasury policy"; account = code })); case (?_) {} } };
@@ -1816,10 +2004,14 @@ module {
           };
           case null x.entries;
         };
-        switch (TreasuryCore.planRecordStatement(s.treasury, x.nostro, x.statement, x.from, x.to, entries, today)) {
+        // the entries a notification already matched are the notification's: dropped here, so the statement finds
+        // those legs marked and reconciles the rest
+        let fresh = Array.filter<TT.StatementEntry>(entries, func(e) { ReconciliationCore.notifiedPosting(s.reconciliation, x.nostro, e) == null });
+        let notified : [T.Event] = if (fresh.size() == entries.size()) [] else [#reconciliation(#statementEntriesNotified({ nostro = x.nostro; statement = x.statement; entries = entries.size() - fresh.size(); day = today }))];
+        switch (TreasuryCore.planRecordStatement(s.treasury, x.nostro, x.statement, x.from, x.to, fresh, today)) {
           case (#err(e)) treasuryErr(e);
           // the mark first: the matches and the breaks name postings the fold must have indexed before it applies them
-          case (#ok(r)) #ok({ event = ?#journalMark({ height = JCore.height(js) }); extra = Array.concat<T.Event>([#treasury(r.ev)], Array.map<TT.TreasuryEvent, T.Event>(r.breaks, func(e) { #treasury(e) })); journal = [] });
+          case (#ok(r)) #ok({ event = ?#journalMark({ height = JCore.height(js) }); extra = Array.concat<T.Event>(Array.concat<T.Event>(notified, [#treasury(r.ev)]), Array.map<TT.TreasuryEvent, T.Event>(r.breaks, func(e) { #treasury(e) })); journal = [] });
         }
       };
       case (#resolveNostroBreak(x)) {
@@ -2154,6 +2346,23 @@ module {
         };
       };
     };
+    if (onlyAction == null) ageReconciliationBreaks(s, acc, day);
+  };
+
+  /// The depot and cash breaks past the reconciliation policy's age, each alerted once by the custody job.
+  func ageReconciliationBreaks(s : State, acc : ChunkAcc, day : Nat) {
+    let ?p = ReconciliationCore.policy(s.reconciliation) else return;
+    for (ev in ReconciliationCore.agedBreaks(s.reconciliation, day, p.breakAgeAlertDays).vals()) {
+      record(acc, #reconciliation(ev));
+      switch (ev) {
+        case (#depotBreakAged(b)) { switch (alertFor(s, { rule = "depot.break.aged"; version = 1; account = b.break_; day; postings = []; detail = "depot break " # Nat.toText(b.break_) # " open for " # Nat.toText(b.ageDays) # " days" }, #endOfDay)) { case (?a) record(acc, a); case null {} } };
+        case (_) {};
+      };
+    };
+    for (b in ReconciliationCore.agedCashBreaks(s.reconciliation, day, p.breakAgeAlertDays).vals()) {
+      record(acc, #reconciliation(#cashBreakAged({ break_ = b.id; ageDays = day - b.openedDay; day })));
+      switch (alertFor(s, { rule = "cash.break.aged"; version = 1; account = b.id; day; postings = []; detail = "cash break " # Nat.toText(b.id) # " in " # b.currency # " open for " # Nat.toText(day - b.openedDay) # " days" }, #endOfDay)) { case (?a) record(acc, a); case null {} };
+    };
   };
 
   /// The settlement job: the cycle of the day closed. Every instruction of the cycle still open is failed with the
@@ -2397,6 +2606,7 @@ module {
       case (#financing(fe)) FinancingCore.fold(s.financing, block.index, fe);
       case (#valuation(ve)) { HedgeCore.fold(s.hedges, block.index, ve); switch (ve) { case (#thetaRecorded(x)) Attribution.observeTheta(s.attribution, x.deal, x.day, x.theta); case (_) {} } };
       case (#collateral(ce)) CollateralCore.fold(s.collateral, block.index, ce);
+      case (#reconciliation(re)) ReconciliationCore.fold(s.reconciliation, block.index, re);
       case (#limits(le)) {
         LimitCore.fold(s.limits, block.index, le);
         switch (le) {
@@ -2485,12 +2695,13 @@ module {
     Attribution.fingerprintInto(w, s.attribution);
     CollateralCore.fingerprintInto(w, s.collateral);
     LimitCore.fingerprintInto(w, s.limits);
+    ReconciliationCore.fingerprintInto(w, s.reconciliation);
   };
   public func fingerprint(s : State) : Blob { let w = JC.Writer(); fingerprintInto(w, s); KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob()) };
   /// The sections of the state, each fingerprinted on its own so a divergence between the live state and a fresh
   /// fold names the sub-state, and so a state too large to digest whole in one message is compared a section at
   /// a time.
-  public func sectionNames() : [Text] { ["authority", "close", "fixings", "alerts", "eod", "treasury", "calls", "custody", "settlement", "financing", "hedges", "attribution", "collateral", "limits"] };
+  public func sectionNames() : [Text] { ["authority", "close", "fixings", "alerts", "eod", "treasury", "calls", "custody", "settlement", "financing", "hedges", "attribution", "collateral", "limits", "reconciliation"] };
   public func fingerprintSection(s : State, name : Text) : ?Blob {
     let w = JC.Writer();
     switch (name) {
@@ -2508,6 +2719,7 @@ module {
       case "attribution" Attribution.fingerprintInto(w, s.attribution);
       case "collateral" CollateralCore.fingerprintInto(w, s.collateral);
       case "limits" LimitCore.fingerprintInto(w, s.limits);
+      case "reconciliation" ReconciliationCore.fingerprintInto(w, s.reconciliation);
       case (_) return null;
     };
     ?KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob())
@@ -2532,6 +2744,7 @@ module {
       ("hedges.rows", s.hedges.rows), ("attribution.rows", s.attribution.rows), ("attribution.captureDay", s.attribution.captureDay),
       ("collateral.agreements", co.agreements), ("collateral.byCounterparty", co.byCounterparty), ("collateral.haircuts", co.haircuts), ("collateral.cash", co.cash), ("collateral.securities", co.securities), ("collateral.securitiesByAgreement", co.securitiesByAgreement), ("collateral.calls", co.calls), ("collateral.callsByAgreement", co.callsByAgreement),
       ("limits.nodes", l.nodes), ("limits.counters", l.counters), ("limits.counterparties", l.counterparties),
+      ("reconciliation.notifications", s.reconciliation.notifications), ("reconciliation.notified", s.reconciliation.notified), ("reconciliation.statements", s.reconciliation.statements), ("reconciliation.depotBreaks", s.reconciliation.depotBreaks), ("reconciliation.cash", s.reconciliation.cash), ("reconciliation.cashBreaks", s.reconciliation.cashBreaks),
     ]
   };
   /// One page of an index digested: the entries from the cursor, at most `limit` of them, hashed with their keys.
@@ -2550,6 +2763,7 @@ module {
       ("settlement", debug_show (SettlementCore.status(s.settlement))), ("financing", debug_show (FinancingCore.status(s.financing))),
       ("hedges", debug_show ((s.hedges.policy, s.hedges.count, s.hedges.open, s.hedges.quotes, s.hedges.thetas))), ("attribution", debug_show (s.attribution.rowCount)),
       ("collateral", debug_show ((CollateralCore.status(s.collateral), CollateralCore.policy(s.collateral)))), ("limits", debug_show ((LimitCore.status(s.limits), LimitCore.sweepView(s.limits)))),
+      ("reconciliation", debug_show ((ReconciliationCore.status(s.reconciliation), ReconciliationCore.policy(s.reconciliation)))),
     ]
   };
 

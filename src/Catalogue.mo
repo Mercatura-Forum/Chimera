@@ -127,6 +127,12 @@ module {
       p("limit.node.remove", "limit", #delete, #command("removeLimitNode"), false, true),
       p("counterparty.amend", "counterparty", #update, #command("amendCounterparty"), false, true),
       p("risk.sweep.open", "risk", #create, #command("openRiskSweep"), false, true),
+      // ── reconciliation: the connector records notifications and statements alone; a break is resolved by a decision ──
+      p("reconciliation.policy", "reconciliation", #update, #command("setReconciliationPolicy"), false, true),
+      p("nostro.notification.record", "nostro", #create, #command("recordNostroNotification"), false, false),
+      p("depot.statement.record", "depot", #create, #command("recordDepotStatement"), false, false),
+      p("depot.break.resolve", "depot", #update, #command("resolveDepotBreak"), false, true),
+      p("cash.break.resolve", "cash", #update, #command("resolveCashBreak"), false, true),
       // ── treasury (Manticore's rows, verbatim) ──
       p("treasury.policy", "treasury", #update, #command("setTreasuryPolicy"), false, true),
       p("treasury.security.register", "treasury", #create, #command("registerSecurity"), false, true),
@@ -227,6 +233,11 @@ module {
       case (#removeLimitNode(_)) "removeLimitNode";
       case (#amendCounterparty(_)) "amendCounterparty";
       case (#openRiskSweep(_)) "openRiskSweep";
+      case (#setReconciliationPolicy(_)) "setReconciliationPolicy";
+      case (#recordNostroNotification(_)) "recordNostroNotification";
+      case (#recordDepotStatement(_)) "recordDepotStatement";
+      case (#resolveDepotBreak(_)) "resolveDepotBreak";
+      case (#resolveCashBreak(_)) "resolveCashBreak";
       case (#setTreasuryPolicy(_)) "setTreasuryPolicy";
       case (#registerSecurity(_)) "registerSecurity";
       case (#publishCurve(_)) "publishCurve";
@@ -259,6 +270,7 @@ module {
       "setCollateralPolicy", "setCollateralAgreement", "postCollateralCash", "pledgeCollateral", "releaseCollateral", "receiveCollateral", "returnCollateral",
       "openCollateralSubstitution", "settleCollateralSubstitution", "settleCollateralInterest",
       "setLimitNode", "removeLimitNode", "amendCounterparty", "openRiskSweep",
+      "setReconciliationPolicy", "recordNostroNotification", "recordDepotStatement", "resolveDepotBreak", "resolveCashBreak",
       "setTreasuryPolicy", "registerSecurity", "publishCurve", "setTreasuryLimit", "registerNostro", "captureDeal", "confirmDeal", "amendDeal", "cancelDeal",
       "settleDealLeg", "markDeal", "recordNostroStatement", "resolveNostroBreak",
     ]
@@ -277,6 +289,7 @@ module {
       ("advanceReplay", "a verification step over the recorded blocks in order; the caller chooses nothing but how many"),
       ("driveSettlement", "the next step of an instruction recorded through four eyes: the calls it makes are the instruction's, the outcome is Tachyon's, and the caller chooses nothing"),
       ("advanceRiskSweep", "one slice of a sweep opened under dual control: the rows walked are the next in order, the figures are the fold's, and the caller chooses nothing"),
+      ("reconcileCash", "the desk's settlement cash account against the ledger declared for its currency: the intent is recorded before the call and the ledger's reply after it, and the caller chooses nothing"),
     ]
   };
 

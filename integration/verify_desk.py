@@ -367,6 +367,57 @@ class Reader(V.Reader):
             return {"sweepPublished": {"day": self.nat(), "slices": self.nat(), "rows": self.nat(), "nodes": self.text_nats()}}
         raise ValueError(f"unknown limits event tag {t:#x}")
 
+    # ── reconciliation ──
+    STATEMENT_KINDS = {1: "holdings", 2: "transactions"}
+    BREAK_KINDS = {1: "position", 2: "transaction"}
+    SIDES = {1: "onStatementOnly", 2: "inOurBooksOnly"}
+
+    def reconciliation_policy(self):
+        accounts = [{"currency": self.text(), "cash": self.cash()} for _ in range(self.len16())]
+        return {"cashAccounts": accounts, "breakAgeAlertDays": self.nat()}
+
+    def reconciliation_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"policySet": self.reconciliation_policy()}
+        if t == 0x02:
+            e = {"nostro": self.text(), "notification": self.blob(), "entries": self.nat()}
+            n = self.len16()
+            matched = []
+            for _ in range(n):
+                es = self.t_entries()
+                assert len(es) == 1, "one entry per match"
+                matched.append((es[0], self.nat()))
+            e.update({"matched": matched, "unmatched": self.nat(), "day": self.nat()})
+            return {"notificationRecorded": e}
+        if t == 0x03:
+            return {"statementEntriesNotified": {"nostro": self.text(), "statement": self.blob(), "entries": self.nat(), "day": self.nat()}}
+        if t == 0x04:
+            return {"depotStatementRecorded": {"depot": self.text(), "statement": self.blob(), "kind": self.STATEMENT_KINDS[self.byte()], "statementDate": self.nat(), "from": self.nat(), "to": self.nat(), "reported": self.nat(), "matched": self.nat(), "explained": self.nat(), "breaks": self.nat(), "day": self.nat()}}
+        if t == 0x05:
+            return {"depotBreak": {"depot": self.text(), "statement": self.blob(), "kind": self.BREAK_KINDS[self.byte()], "side": self.SIDES[self.byte()], "isin": self.text(), "ours": self.nat(), "theirs": self.nat(), "reference": self.text(), "instruction": self.opt_nat(), "day": self.nat()}}
+        if t == 0x06:
+            return {"breakExplainedByFail": {"depot": self.text(), "statement": self.blob(), "isin": self.text(), "reference": self.text(), "instruction": self.nat(), "nominal": self.nat(), "day": self.nat()}}
+        if t == 0x07:
+            return {"depotBreakAged": {"break": self.nat(), "ageDays": self.nat(), "day": self.nat()}}
+        if t == 0x08:
+            return {"depotBreakResolved": {"break": self.nat(), "resolution": self.text(), "correction": self.opt_nat(), "day": self.nat()}}
+        if t == 0x09:
+            return {"cashReconciliationIntended": {"currency": self.text(), "ledger": self.principal(), "day": self.nat()}}
+        if t == 0x0A:
+            return {"cashReconciled": {"currency": self.text(), "ledger": self.principal(), "ledgerBalance": self.nat(), "bookBalance": self.int_(), "difference": self.int_(), "tipHeight": self.opt_nat(), "day": self.nat()}}
+        if t == 0x0B:
+            return {"cashReconciliationFailed": {"currency": self.text(), "ledger": self.principal(), "reason": self.text(), "day": self.nat()}}
+        if t == 0x0C:
+            return {"cashBreak": {"currency": self.text(), "ledger": self.principal(), "ledgerBalance": self.nat(), "bookBalance": self.int_(), "difference": self.int_(), "day": self.nat()}}
+        if t == 0x0D:
+            return {"cashBreakCleared": {"break": self.nat(), "day": self.nat()}}
+        if t == 0x0E:
+            return {"cashBreakResolved": {"break": self.nat(), "resolution": self.text(), "correction": self.opt_nat(), "day": self.nat()}}
+        if t == 0x0F:
+            return {"cashBreakAged": {"break": self.nat(), "ageDays": self.nat(), "day": self.nat()}}
+        raise ValueError(f"unknown reconciliation event tag {t:#x}")
+
     def payer(self):
         return {1: "desk", 2: "counterparty"}[self.byte()]
 
@@ -593,6 +644,16 @@ class Reader(V.Reader):
             return {"amendCounterparty": {"counterparty": {"name": self.text(), "group": self.text(), "country": self.text()}}}
         if tag == 0xA3:
             return {"openRiskSweep": {"sliceSize": self.nat()}}
+        if tag == 0xB0:
+            return {"setReconciliationPolicy": self.reconciliation_policy()}
+        if tag == 0xB1:
+            return {"recordNostroNotification": {"nostro": self.text(), "document": self.blob()}}
+        if tag == 0xB2:
+            return {"recordDepotStatement": {"depot": self.text(), "document": self.blob()}}
+        if tag == 0xB3:
+            return {"resolveDepotBreak": {"break": self.nat(), "resolution": self.text(), "correction": self.opt_nat()}}
+        if tag == 0xB4:
+            return {"resolveCashBreak": {"break": self.nat(), "resolution": self.text(), "correction": self.opt_nat()}}
         raise ValueError(f"unknown command tag {tag:#x}")
 
     def proposed(self):
@@ -686,6 +747,8 @@ class Reader(V.Reader):
             return {"collateral": self.collateral_event()}
         if t == 0x66:
             return {"limits": self.limit_event()}
+        if t == 0x67:
+            return {"reconciliation": self.reconciliation_event()}
         raise ValueError(f"unknown desk event tag {t:#x}")
 
     # ── lifted without change from Manticore's verify_bank.py at 9c0c30e ──

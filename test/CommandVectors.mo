@@ -8,6 +8,11 @@ import Freeze "mo:kernel/domain/Freeze";
 module {
   public func vectors() : [Freeze.Vector] {
     [
+      { family = "setReconciliationPolicy"; version = 1; hex = "ca7825795b1d03b2ef55b42305f23bd4f605218f10d2430e994e81a970bab7ff" },
+      { family = "recordNostroNotification"; version = 1; hex = "fb2332948567ff82255bfff99e14710e116d9f68f5184d997427e480f75e8cec" },
+      { family = "recordDepotStatement"; version = 1; hex = "0335b12d0021c78ebc737ec7e2937cbc5a2b7cc6a324f8b294ff28b253d90ede" },
+      { family = "resolveDepotBreak"; version = 1; hex = "feaecc81c34993f59048887748424334a0fb72fbbbaeb181700b8c95cf69bacf" },
+      { family = "resolveCashBreak"; version = 1; hex = "ebe680c6c6ce5ff5c469086cb92197e6cf08fff249b1c2efd30826dcee05ca28" },
       { family = "setCollateralPolicy"; version = 1; hex = "e0ccc2a895e5d1773a648109bd48ca3086849059bbd842450fbad15859f0fc79" },
       { family = "setCollateralAgreement"; version = 1; hex = "1105280b198dad83e912c1c7443ad946ed7bb3f7ed940c7dcdac93d4dc9ca638" },
       { family = "postCollateralCash"; version = 1; hex = "ca168416d8bd9c0b3662193eb5808f5fb2eb6acdb8cb80bb387fd1ccc31b6613" },

@@ -19,6 +19,7 @@ import FT "../../src/FinancingTypes";
 import VT "../../src/ValuationTypes";
 import CoT "../../src/CollateralTypes";
 import LT "../../src/LimitTypes";
+import RT "../../src/ReconciliationTypes";
 
 import T "../../src/DeskTypes";
 import Can "../../src/DeskCanonical";
@@ -63,8 +64,16 @@ module {
   public let tenorNode : LT.Node = { id = "TENOR-1Y"; kind = #tenor({ fromDays = 0; toDays = 365 }); parent = null; currency = "EGP"; limit = 500_000_000_00 };
   public let counterpartyRecord : LT.Counterparty = { name = "CITI"; group = "CITIGROUP"; country = "US" };
 
+  public let reconciliationPolicy : RT.Policy = { cashAccounts = [{ currency = "EGP"; cash = cash }, { currency = "USD"; cash = nostro }]; breakAgeAlertDays = 3 };
+  public let entry : TT.StatementEntry = { reference = "security-1"; amount = 9_850_000_00; credit = false; valueDay = 20672; bookingDay = 20672; counterparty = "CITI" };
+
   public func samples() : [Freeze.Sample<T.Command>] {
     [
+      { family = "setReconciliationPolicy"; command = #setReconciliationPolicy(reconciliationPolicy) },
+      { family = "recordNostroNotification"; command = #recordNostroNotification({ nostro = "NOSTRO-USD-CITI"; document = h(5) }) },
+      { family = "recordDepotStatement"; command = #recordDepotStatement({ depot = "DEPOT-CITI"; document = h(6) }) },
+      { family = "resolveDepotBreak"; command = #resolveDepotBreak({ break_ = 140; resolution = "the custodian corrected its report"; correction = ?150 }) },
+      { family = "resolveCashBreak"; command = #resolveCashBreak({ break_ = 141; resolution = "a fee the ledger took"; correction = null }) },
       { family = "setCollateralPolicy"; command = #setCollateralPolicy(collateralPolicy) },
       { family = "setCollateralAgreement"; command = #setCollateralAgreement({ agreement }) },
       { family = "postCollateralCash"; command = #postCollateralCash({ agreement = "CSA-CITI"; move = #received; amount = 1_200_000_00; currency = "EGP"; postingDate = 20671; valueDate = 20671; period = "2026-08"; narration = "collateral cash" }) },
@@ -298,6 +307,25 @@ module {
       #limits(#sweepSliced({ day = 20672; slice = 0; family = #treasury; visited = 256; nextCursor = ?h(9); familyDone = false; nodes = [("CP-CITI", 9_850_000_00)]; agreements = [("CSA-CITI", -1_234_00, 3)] })),
       #limits(#sweepSliced({ day = 20672; slice = 1; family = #loan; visited = 3; nextCursor = null; familyDone = true; nodes = []; agreements = [] })),
       #limits(#sweepPublished({ day = 20672; slices = 5; rows = 300; nodes = [("CP-CITI", 9_850_000_00), ("GRP-CITI", 12_000_000_00)] })),
+      #reconciliation(#policySet(reconciliationPolicy)),
+      #reconciliation(#notificationRecorded({ nostro = "NOSTRO-USD-CITI"; notification = h(5); entries = 3; matched = [(entry, 77), ({ entry with reference = "security-2" }, 78)]; unmatched = 1; day = 20672 })),
+      #reconciliation(#notificationRecorded({ nostro = "NOSTRO-USD-CITI"; notification = h(9); entries = 1; matched = []; unmatched = 1; day = 20672 })),
+      #reconciliation(#statementEntriesNotified({ nostro = "NOSTRO-USD-CITI"; statement = h(4); entries = 2; day = 20673 })),
+      #reconciliation(#depotStatementRecorded({ depot = "DEPOT-CITI"; statement = h(6); kind = #holdings; statementDate = 20672; from = 20672; to = 20672; reported = 3; matched = 2; explained = 0; breaks = 1; day = 20673 })),
+      #reconciliation(#depotStatementRecorded({ depot = "DEPOT-CITI"; statement = h(7); kind = #transactions; statementDate = 20672; from = 20670; to = 20672; reported = 5; matched = 3; explained = 1; breaks = 1; day = 20673 })),
+      #reconciliation(#depotBreak({ depot = "DEPOT-CITI"; statement = h(6); kind = #position; side = #onStatementOnly; isin = "EG0000012345"; ours = 10_000_000_00; theirs = 10_500_000_00; reference = ""; instruction = null; day = 20673 })),
+      #reconciliation(#depotBreak({ depot = "DEPOT-CITI"; statement = h(7); kind = #transaction; side = #inOurBooksOnly; isin = "EG0000012345"; ours = 1_000_000_00; theirs = 0; reference = "security-9"; instruction = ?120; day = 20673 })),
+      #reconciliation(#breakExplainedByFail({ depot = "DEPOT-CITI"; statement = h(7); isin = "EG0000012345"; reference = "security-8"; instruction = 121; nominal = 2_000_000_00; day = 20673 })),
+      #reconciliation(#depotBreakAged({ break_ = 140; ageDays = 3; day = 20676 })),
+      #reconciliation(#depotBreakResolved({ break_ = 140; resolution = "the custodian corrected its report"; correction = ?150; day = 20677 })),
+      #reconciliation(#cashReconciliationIntended({ currency = "EGP"; ledger = bob(); day = 20672 })),
+      #reconciliation(#cashReconciled({ currency = "EGP"; ledger = bob(); ledgerBalance = 500_000_000_00; bookBalance = 499_999_000_00; difference = 1_000_00; tipHeight = ?4_512; day = 20672 })),
+      #reconciliation(#cashReconciled({ currency = "USD"; ledger = bob(); ledgerBalance = 1; bookBalance = -1; difference = 2; tipHeight = null; day = 20672 })),
+      #reconciliation(#cashReconciliationFailed({ currency = "EGP"; ledger = bob(); reason = "the ledger did not answer its balance"; day = 20672 })),
+      #reconciliation(#cashBreak({ currency = "EGP"; ledger = bob(); ledgerBalance = 500_000_000_00; bookBalance = 499_999_000_00; difference = 1_000_00; day = 20672 })),
+      #reconciliation(#cashBreakAged({ break_ = 141; ageDays = 3; day = 20675 })),
+      #reconciliation(#cashBreakCleared({ break_ = 141; day = 20676 })),
+      #reconciliation(#cashBreakResolved({ break_ = 141; resolution = "a fee the ledger took"; correction = null; day = 20676 })),
     ]
   };
 }

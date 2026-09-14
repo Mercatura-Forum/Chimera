@@ -75,6 +75,8 @@ import CoT "CollateralTypes";
 import CollateralCore "CollateralCore";
 import LT "LimitTypes";
 import LimitCore "LimitCore";
+import RT "ReconciliationTypes";
+import ReconciliationCore "ReconciliationCore";
 import IC "mo:core/InternetComputer";
 import DT "mo:tachyon/DvpTypes";
 import ICRC "mo:tachyon/ICRC";
@@ -752,6 +754,7 @@ shared (initMsg) persistent actor class Desk(init : {
     icrc1_fee : shared query () -> async Nat;
     icrc1_balance_of : shared query (ICRC.Account) -> async Nat;
     icrc2_approve : (ICRC.ApproveArgs) -> async ICRC.ApproveResult;
+    icrc3_get_blocks : shared query ([{ start : Nat; length : Nat }]) -> async { log_length : Nat };
   };
   /// One drive at a time per instruction: a second caller while a call is out is refused, not doubled.
   transient let driving = Map.empty<Nat, ()>();
@@ -855,6 +858,33 @@ shared (initMsg) persistent actor class Desk(init : {
     let result = try { await* driveStep(venue, i) } catch (e) { ignore Map.delete(driving, Nat.compare, id); throw e };
     ignore Map.delete(driving, Nat.compare, id);
     result
+  };
+  public type CashReconciliationResult = { currency : Text; ledgerBalance : Nat; bookBalance : Int; difference : Int; break_ : ?Nat; blocks : [Nat] };
+  /// The desk's settlement cash account against the ledger the venue settles the currency on: the intent is
+  /// recorded, the ledger asked for the balance and its log height, the reply recorded with the height beside it
+  /// and the book's figure; a difference opens a break, an agreement clears the standing one. Open by
+  /// design: a caller chooses nothing.
+  public shared func reconcileCash(currency : Text) : async Result.Result<CashReconciliationResult, T.Error> {
+    let prep = switch (Core.prepareCashReconciliation(desk, journal, now(), currency)) { case (#err(e)) return #err(e); case (#ok(p)) p };
+    let blocks = List.empty<Nat>();
+    List.add(blocks, commitDesk(me(), prep.event, null).index);
+    let ledger : Ledger_ = actor (Principal.toText(prep.ledger));
+    let balance = try { await ledger.icrc1_balance_of({ owner = me(); subaccount = null }) } catch (_e) {
+      let day = JCore.effectiveToday(journal, now());
+      List.add(blocks, commitDesk(me(), #reconciliation(#cashReconciliationFailed({ currency; ledger = prep.ledger; reason = "the ledger did not answer its balance"; day })), null).index);
+      return #err(#ReconciliationError({ error = #LedgerUnreachable({ currency; reason = "the ledger did not answer its balance" }) }));
+    };
+    // the ledger's log height at the reply, so the balance is placed on the ledger's own history
+    let tip : ?Nat = try { ?(await ledger.icrc3_get_blocks([])).log_length } catch (_e) { null };
+    let events = Core.completeCashReconciliation(desk, journal, now(), currency, prep.ledger, prep.cash, balance, tip);
+    var brk : ?Nat = null;
+    for (ev in events.vals()) {
+      let idx = commitDesk(me(), ev, null).index;
+      List.add(blocks, idx);
+      switch (ev) { case (#reconciliation(#cashBreak(_))) brk := ?idx; case (_) {} };
+    };
+    let row = switch (ReconciliationCore.cashRow(desk.reconciliation, currency)) { case (?r) r; case null Runtime.trap("Desk: the cash reconciliation vanished") };
+    #ok({ currency; ledgerBalance = row.ledgerBalance; bookBalance = row.bookBalance; difference = row.difference; break_ = if (row.openBreak == 0) null else ?row.openBreak; blocks = List.toArray(blocks) })
   };
   func driveStep(venue : ST.Venue, i : SettlementCore.InstructionRow) : async* Result.Result<ST.Step, T.Error> {
     let core : Core_ = actor (Principal.toText(venue.core));
@@ -1015,6 +1045,20 @@ shared (initMsg) persistent actor class Desk(init : {
     let ?inst = CustodyCore.instrument(desk.custody, isin) else return null;
     CollateralCore.haircutBps(desk.collateral, a, inst.classification, if (sec.maturity > day) sec.maturity - day else 0)
   };
+
+  // ─── reconciliation ───
+  public query func depotBreaks() : async [RT.DepotBreakView] { let today = JCore.effectiveToday(journal, now()); Array.map<ReconciliationCore.DepotBreakRow, RT.DepotBreakView>(ReconciliationCore.depotBreaks(desk.reconciliation), func(b) { ReconciliationCore.depotBreakView(b, today) }) };
+  public query func depotBreak(id : Nat) : async ?RT.DepotBreakView { switch (ReconciliationCore.depotBreak(desk.reconciliation, id)) { case (?b) ?ReconciliationCore.depotBreakView(b, JCore.effectiveToday(journal, now())); case null null } };
+  public query func depotStatements() : async [{ statement : Blob; depot : Text; kind : Text; statementDate : Nat; from : Nat; to : Nat; reported : Nat; matched : Nat; explained : Nat; breaks : Nat; day : Nat }] {
+    Array.map<ReconciliationCore.DepotStatementRow, { statement : Blob; depot : Text; kind : Text; statementDate : Nat; from : Nat; to : Nat; reported : Nat; matched : Nat; explained : Nat; breaks : Nat; day : Nat }>(ReconciliationCore.statements(desk.reconciliation), func(r) { { statement = r.statement; depot = r.depot; kind = RT.statementKindText(r.kind); statementDate = r.statementDate; from = r.from; to = r.to; reported = r.reported; matched = r.matched; explained = r.explained; breaks = r.breaks; day = r.day } })
+  };
+  public query func depotPositions(depot : Text) : async [(Text, Nat)] { Core.depotPositions(desk, depot) };
+  public query func cashReconciliations() : async [RT.CashView] { Array.map<ReconciliationCore.CashRow, RT.CashView>(ReconciliationCore.cashRows(desk.reconciliation), ReconciliationCore.cashView) };
+  public query func cashBreaks() : async [RT.CashBreakView] { let today = JCore.effectiveToday(journal, now()); Array.map<ReconciliationCore.CashBreakRow, RT.CashBreakView>(ReconciliationCore.cashBreaks(desk.reconciliation), func(b) { ReconciliationCore.cashBreakView(b, today) }) };
+  public query func reconciliationStatus() : async RT.Status { ReconciliationCore.status(desk.reconciliation) };
+  /// The reconciliation report of a day: canonical text, its hash, at the log's height; the same state and day
+  /// give the same bytes, so a reader re-derives it from the logs.
+  public query func reconciliationReport(day : Nat) : async { height : Nat; day : Nat; json : Text; hash : Blob } { Core.reconciliationReport(desk, day) };
 
   // ─── limits ───
   public query func limitNode(id : Text) : async ?LT.NodeView { switch (LimitCore.node(desk.limits, id)) { case (?n) ?LimitCore.view(n); case null null } };

@@ -28,5 +28,23 @@
   "bytes": 76544,
   "url": "https://www.iso20022.org/sites/default/files/documents/messages/sese/schemas/sese.025.001.09.xsd",
   "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
+ },
+ "camt.054.001.08.xsd": {
+  "sha256": "13d220337d47e22cf25788807c136794a76955791df612c6947277272d440da6",
+  "bytes": 103313,
+  "url": "https://www.iso20022.org/sites/default/files/documents/messages/camt/schemas/camt.054.001.08.xsd",
+  "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
+ },
+ "semt.002.001.11.xsd": {
+  "sha256": "ae1fcdb90e9d5b239ed5b4c7b3507e82d1d7ac3192bbad585b153b81d80cbd32",
+  "bytes": 56465,
+  "url": "https://www.iso20022.org/sites/default/files/documents/messages/semt/schemas/semt.002.001.11.xsd",
+  "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
+ },
+ "semt.017.001.12.xsd": {
+  "sha256": "72bfdd8c80c16cda00afe7f85ac7dbbeb1f249921c38c68456392900a8571e06",
+  "bytes": 61106,
+  "url": "https://www.iso20022.org/sites/default/files/documents/messages/semt/schemas/semt.017.001.12.xsd",
+  "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
  }
 }
