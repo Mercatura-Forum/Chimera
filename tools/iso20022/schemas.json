@@ -46,5 +46,11 @@
   "bytes": 61106,
   "url": "https://www.iso20022.org/sites/default/files/documents/messages/semt/schemas/semt.017.001.12.xsd",
   "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
+ },
+ "setr.027.001.05.xsd": {
+  "sha256": "091510de035729e2fde3c6028a1ae940b0fb06f26533a7e8ecc4aca982516486",
+  "bytes": 129164,
+  "url": "https://www.iso20022.org/sites/default/files/documents/messages/setr/schemas/setr.027.001.05.xsd",
+  "source": "ISO 20022 message definitions, public catalogue (www.iso20022.org)"
  }
 }

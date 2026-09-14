@@ -68,6 +68,14 @@ import LimitCore "LimitCore";
 import RT "ReconciliationTypes";
 import ReconciliationCore "ReconciliationCore";
 import ReconciliationMessages "ReconciliationMessages";
+import LQ "LiquidityTypes";
+import LiquidityCore "LiquidityCore";
+import FeT "FeedTypes";
+import FeedCore "FeedCore";
+import MkT "MarketTypes";
+import MarketCore "MarketCore";
+import DayCount "mo:manticore/DayCount";
+import Xml "mo:manticore/Xml";
 import Shard "mo:kernel/sweep/Shard";
 import R "mo:kernel/rows/StableRows";
 import Map "mo:core/Map";
@@ -98,6 +106,9 @@ module {
     collateral : CollateralCore.State;
     limits : LimitCore.State;
     reconciliation : ReconciliationCore.State;
+    liquidity : LiquidityCore.State;
+    feed : FeedCore.State;
+    market : MarketCore.State;
   };
 
   public func newState(installer : Principal) : State { newStateIn(installer, RI.newArena()) };
@@ -120,6 +131,9 @@ module {
       collateral = CollateralCore.newState(arena);
       limits = LimitCore.newState(arena);
       reconciliation = ReconciliationCore.newState(arena);
+      liquidity = LiquidityCore.newState(arena);
+      feed = FeedCore.newState(arena);
+      market = MarketCore.newState(arena);
     }
   };
 
@@ -175,6 +189,8 @@ module {
   public func commandBookOf(s : State, c : T.Command) : ?T.BookId {
     switch (c) {
       case (#captureDeal(x)) ?x.book;
+      case (#stageOrder(x)) ?x.terms.book;
+      case (#cancelOrder(x)) { switch (MarketCore.order(s.market, x.order)) { case (?o) ?o.book; case null null } };
       case (#setTreasuryLimit(x)) ?x.limit.book;
       case (#openEndOfDay(x)) ?x.book;
       case (#setRetryPolicy(x)) ?x.book;
@@ -254,6 +270,7 @@ module {
   public func commandTotals(s : State, c : T.Command) : [(Text, Nat)] {
     switch (c) {
       case (#captureDeal(x)) treasuryKindTotals(s, x.kind);
+      case (#stageOrder(x)) orderTotals(s, x.terms);
       case (#amendDeal(x)) treasuryKindTotals(s, x.kind);
       case (#cancelDeal(x)) notionalOfDeal(s, x.deal);
       case (#settleDealLeg(x)) notionalOfDeal(s, x.deal);
@@ -439,6 +456,11 @@ module {
       };
       case (#openRepo(x)) ?(repoFacts(s.height, x.book, TreasuryCore.hash8(x.counterparty.name), x.terms.currency, x.terms.cash, switch (x.terms.maturity) { case (?m) m; case null 0 }, day), null);
       case (#openLoan(x)) ?(loanFacts(s.height, x.book, TreasuryCore.hash8(x.counterparty.name), x.terms.currency, TreasuryMath.cleanCost(x.terms.nominal, x.terms.valueMicro)), null);
+      case (#stageOrder(x)) {
+        let ?m = MarketCore.market(s.market, x.terms.isin) else return null;
+        let kind : TT.DealKind = #security({ isin = x.terms.isin; direction = switch (x.terms.side) { case (#buy) #buy; case (#sell) #sell }; nominal = x.terms.units * m.unitNominal; priceMicro = 0; settlement = day; classification = x.terms.classification; cash = x.terms.cash; priceCurve = x.terms.isin; venue = null });
+        ?(treasuryCaptureFacts(s, s.height, x.terms.book, 0, kind, day), x.approver)
+      };
       case (_) null;
     }
   };
@@ -885,6 +907,8 @@ module {
   };
 
   func settlementErr<X>(e : ST.Error) : Res<X> { #err(#SettlementError({ error = e })) };
+  /// The unit of face the instrument's ledger is denominated in: the market's when one is declared, else one minor unit.
+  func ledgerUnitOf(s : State, isin : Text) : Nat { switch (MarketCore.market(s.market, isin)) { case (?m) m.unitNominal; case null 1 } };
   func settlementPlan(r : Result.Result<ST.Event, ST.Error>) : Res<Plan> { switch (r) { case (#err(e)) settlementErr(e); case (#ok(ev)) only(#settlement(ev)) } };
   func instructionRow(s : State, id : Nat) : Res<SettlementCore.InstructionRow> { switch (SettlementCore.instruction(s.settlement, id)) { case (?i) #ok(i); case null settlementErr(#UnknownInstruction({ instruction = id })) } };
   /// The settlement amount of a security deal's delivery leg and its sese.023, as the desk renders it: the clean
@@ -1451,7 +1475,7 @@ module {
         let kind = switch (treasuryKind(bb, r)) { case (#err(e)) return #err(e); case (#ok(k)) k };
         let #security(t) = kind else return settlementErr(#DealNotSettleable({ deal = x.deal; reason = "not a security" }));
         let (amount, document) = switch (instructionDocument(s, js, bb, r, t)) { case (#err(e)) return #err(e); case (#ok(v)) v };
-        settlementPlan(SettlementCore.planInstruct(s.settlement, s.treasury, r, t, amount, x.counterparty, x.tradeId, x.reference, Sha256.fromBlob(#sha256, Text.encodeUtf8(document)), today))
+        settlementPlan(SettlementCore.planInstruct(s.settlement, s.treasury, r, t, amount, ledgerUnitOf(s, t.isin), x.counterparty, x.tradeId, x.reference, Sha256.fromBlob(#sha256, Text.encodeUtf8(document)), today))
       };
       case (#setInstructionTrade(x)) {
         let i = switch (instructionRow(s, x.instruction)) { case (#err(e)) return #err(e); case (#ok(i)) i };
@@ -1625,7 +1649,7 @@ module {
       case (#instructFinancing(x)) {
         switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
         let amounts = switch (financingLegAmounts(s, x.family, x.id, x.leg, today)) { case (#err(e)) return #err(e); case (#ok(v)) v };
-        settlementPlan(SettlementCore.planInstructFinancing(s.settlement, x.family, x.id, x.leg, amounts.isin, amounts.currency, amounts.nominal, amounts.cash, amounts.deskDelivers, amounts.cycleDay, x.counterparty, x.tradeId, x.reference, today))
+        settlementPlan(SettlementCore.planInstructFinancing(s.settlement, x.family, x.id, x.leg, amounts.isin, amounts.currency, amounts.nominal, ledgerUnitOf(s, amounts.isin), amounts.cash, amounts.deskDelivers, amounts.cycleDay, x.counterparty, x.tradeId, x.reference, today))
       };
       // ── valuation ──
       case (#setValuationPolicy(pol)) {
@@ -1907,6 +1931,63 @@ module {
       case (#resolveCashBreak(x)) {
         switch (x.correction) { case (?c) { if (c >= s.height) return reconErr(#BadDocument({ reason = "the correction names a recorded block" })) }; case null {} };
         switch (ReconciliationCore.planResolveCashBreak(s.reconciliation, x.break_, x.resolution, x.correction, today)) { case (#err(e)) reconErr(e); case (#ok(ev)) only(#reconciliation(ev)) }
+      };
+      // ── liquidity ──
+      case (#setLiquidityFactors(f)) { switch (LiquidityCore.planFactors(f, today)) { case (#err(e)) liquidityErr(e); case (#ok(ev)) only(#liquidity(ev)) } };
+      case (#classifyInstrument(x)) {
+        let ?_ = TreasuryCore.security(s.treasury, x.isin) else return treasuryErr(#UnknownSecurity({ isin = x.isin }));
+        switch (LiquidityCore.planClassifyInstrument(x.isin, x.level, today)) { case (#err(e)) liquidityErr(e); case (#ok(ev)) only(#liquidity(ev)) }
+      };
+      case (#classifyCounterparty(x)) { switch (LiquidityCore.planClassifyCounterparty(x.name, x.counterpartyType, today)) { case (#err(e)) liquidityErr(e); case (#ok(ev)) only(#liquidity(ev)) } };
+      case (#declareCapital(x)) { switch (LiquidityCore.planCapital(x.currency, x.amount, today)) { case (#err(e)) liquidityErr(e); case (#ok(ev)) only(#liquidity(ev)) } };
+      // ── the feed ──
+      case (#declareFeed(x)) {
+        let ?_ = TreasuryCore.security(s.treasury, x.feed.isin) else return treasuryErr(#UnknownSecurity({ isin = x.feed.isin }));
+        switch (FeedCore.planDeclare(x.feed, today)) { case (#err(e)) feedErr(e); case (#ok(ev)) only(#feed(ev)) }
+      };
+      case (#submitPrice(x)) {
+        switch (FeedCore.planSubmit(s.feed, x.submission, now, today)) {
+          case (#err(e)) feedErr(e);
+          case (#ok(evs)) {
+            // an acceptance publishes the day's price curve of the instrument, sourced to the acceptance's figures
+            let all = List.empty<T.Event>();
+            for (ev in evs.vals()) {
+              List.add(all, #feed(ev));
+              switch (ev) {
+                case (#priceAccepted(a)) {
+                  let ?sec = TreasuryCore.security(s.treasury, a.isin) else return treasuryErr(#UnknownSecurity({ isin = a.isin }));
+                  let w = JC.Writer(); for (f in a.figures.vals()) { w.text(f.source); w.nat(f.priceMicro); w.nat(Nat64.toNat(f.asOf)) };
+                  List.add(all, #treasury(#curvePublished({ curve = { id = a.isin; kind = #securityPrice; currency = sec.currency; day = today; points = [(0, a.priceMicro)]; source = Sha256.fromBlob(#sha256, w.toBlob()) } })));
+                };
+                case (_) {};
+              };
+            };
+            let arr = List.toArray(all);
+            #ok({ event = ?arr[0]; extra = Array.sliceToArray<T.Event>(arr, 1, arr.size()); journal = [] })
+          };
+        }
+      };
+      case (#liftHalt(x)) { switch (FeedCore.planLift(s.feed, x.isin, today)) { case (#err(e)) feedErr(e); case (#ok(ev)) only(#feed(ev)) } };
+      // ── the market ──
+      case (#declareMarket(x)) {
+        let ?_ = TreasuryCore.security(s.treasury, x.market.isin) else return treasuryErr(#UnknownSecurity({ isin = x.market.isin }));
+        switch (MarketCore.planDeclare(x.market, today)) { case (#err(e)) marketErr(e); case (#ok(ev)) only(#market(ev)) }
+      };
+      case (#stageOrder(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        switch (Auth.requireOpenBook(a, x.terms.book)) { case (?e) return #err(e); case null {} };
+        let tree = switch (treeEventsOf(s, command, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs };
+        switch (MarketCore.planStage(s.market, x.terms, authority, tree.size() == 0, x.approver, today)) {
+          case (#err(e)) marketErr(e);
+          case (#ok(ev)) #ok({ event = ?#market(ev); extra = tree; journal = [] });
+        }
+      };
+      case (#cancelOrder(x)) {
+        switch (MarketCore.planCancel(s.market, x.order, x.reason, today)) { case (#err(e)) marketErr(e); case (#ok(ev)) only(#market(ev)) }
+      };
+      case (#openMarketCycle(x)) {
+        let reference = switch (FeedCore.referencePrice(s.feed, x.isin, now)) { case (#err(e)) return feedErr(e); case (#ok(r)) r };
+        switch (MarketCore.planOpenCycle(s.market, x.isin, reference.priceMicro, reference.block, today)) { case (#err(e)) marketErr(e); case (#ok(ev)) only(#market(ev)) }
       };
       // ── treasury: Manticore's planners with the desk's context ──
       case (#setTreasuryPolicy(pol)) {
@@ -2346,10 +2427,18 @@ module {
         };
       };
     };
-    if (onlyAction == null) ageReconciliationBreaks(s, acc, day);
+    if (onlyAction == null) { ageReconciliationBreaks(s, acc, day); haltStaleFeeds(s, acc, now, day) };
   };
 
   /// The depot and cash breaks past the reconciliation policy's age, each alerted once by the custody job.
+  /// A feed whose accepted price is older than its bound is halted by the run, once, until the sources agree
+  /// again and a decision lifts it.
+  func haltStaleFeeds(s : State, acc : ChunkAcc, now : Nat64, day : Nat) {
+    for (f in FeedCore.staleFeeds(s.feed, now).vals()) {
+      let figures = Array.map<FeedCore.SourceRow, FeT.Figure>(Array.filter<FeedCore.SourceRow>(FeedCore.sourcesOf(s.feed, f.isin), func(r) { r.latestBlock > 0 }), func(r) { { source = r.source; priceMicro = r.latestMicro; asOf = r.latestAsOf } });
+      record(acc, #feed(#instrumentHalted({ isin = f.isin; reason = #stale; figures; day })));
+    };
+  };
   func ageReconciliationBreaks(s : State, acc : ChunkAcc, day : Nat) {
     let ?p = ReconciliationCore.policy(s.reconciliation) else return;
     for (ev in ReconciliationCore.agedBreaks(s.reconciliation, day, p.breakAgeAlertDays).vals()) {
@@ -2381,6 +2470,8 @@ module {
         case (#settled) settled += 1;
         case (#boughtIn or #cancelled) {};
         case (#failed) { if (i.cycle == day) failed += 1 };
+        case (#matched) { if (i.tradeId != 0) { pending += 1; continue }; if (not mine) { pending += 1; continue }; acc.examined += 1; let fails = i.fails + 1; record(acc, #settlement(#failed({ instruction = i.id; cause = "the engine settled nothing by the close of cycle " # Nat.toText(day); fails; day }))); failed += 1;
+          if (fails <= venue.recycleLimit) { if (SettlementCore.cycle(s.settlement, nextDay) == null) record(acc, #settlement(#cycleOpened({ cycle = { businessDate = nextDay; market = c.market; priceSource = c.priceSource }; day }))); record(acc, #settlement(#recycled({ instruction = i.id; cycle = nextDay; fails; day }))) } };
         case (_) {
           if (not mine) { pending += 1; continue };
           acc.examined += 1;
@@ -2602,11 +2693,14 @@ module {
       };
       case (#call(ce)) CallCore.fold(s.calls, block.index, ce);
       case (#custody(ce)) CustodyCore.fold(s.custody, block.index, ce, isinOfLot(s));
-      case (#settlement(se)) SettlementCore.fold(s.settlement, block.index, se);
+      case (#settlement(se)) { SettlementCore.fold(s.settlement, block.index, se); MarketCore.observeSettlement(s.market, block.index, se) };
       case (#financing(fe)) FinancingCore.fold(s.financing, block.index, fe);
       case (#valuation(ve)) { HedgeCore.fold(s.hedges, block.index, ve); switch (ve) { case (#thetaRecorded(x)) Attribution.observeTheta(s.attribution, x.deal, x.day, x.theta); case (_) {} } };
       case (#collateral(ce)) CollateralCore.fold(s.collateral, block.index, ce);
       case (#reconciliation(re)) ReconciliationCore.fold(s.reconciliation, block.index, re);
+      case (#liquidity(le)) LiquidityCore.fold(s.liquidity, block.index, le);
+      case (#feed(fe)) FeedCore.fold(s.feed, block.index, fe);
+      case (#market(me)) MarketCore.fold(s.market, block.index, me);
       case (#limits(le)) {
         LimitCore.fold(s.limits, block.index, le);
         switch (le) {
@@ -2696,12 +2790,15 @@ module {
     CollateralCore.fingerprintInto(w, s.collateral);
     LimitCore.fingerprintInto(w, s.limits);
     ReconciliationCore.fingerprintInto(w, s.reconciliation);
+    LiquidityCore.fingerprintInto(w, s.liquidity);
+    FeedCore.fingerprintInto(w, s.feed);
+    MarketCore.fingerprintInto(w, s.market);
   };
   public func fingerprint(s : State) : Blob { let w = JC.Writer(); fingerprintInto(w, s); KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob()) };
   /// The sections of the state, each fingerprinted on its own so a divergence between the live state and a fresh
   /// fold names the sub-state, and so a state too large to digest whole in one message is compared a section at
   /// a time.
-  public func sectionNames() : [Text] { ["authority", "close", "fixings", "alerts", "eod", "treasury", "calls", "custody", "settlement", "financing", "hedges", "attribution", "collateral", "limits", "reconciliation"] };
+  public func sectionNames() : [Text] { ["authority", "close", "fixings", "alerts", "eod", "treasury", "calls", "custody", "settlement", "financing", "hedges", "attribution", "collateral", "limits", "reconciliation", "liquidity", "feed", "market"] };
   public func fingerprintSection(s : State, name : Text) : ?Blob {
     let w = JC.Writer();
     switch (name) {
@@ -2720,6 +2817,9 @@ module {
       case "collateral" CollateralCore.fingerprintInto(w, s.collateral);
       case "limits" LimitCore.fingerprintInto(w, s.limits);
       case "reconciliation" ReconciliationCore.fingerprintInto(w, s.reconciliation);
+      case "liquidity" LiquidityCore.fingerprintInto(w, s.liquidity);
+      case "feed" FeedCore.fingerprintInto(w, s.feed);
+      case "market" MarketCore.fingerprintInto(w, s.market);
       case (_) return null;
     };
     ?KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob())
@@ -2745,6 +2845,10 @@ module {
       ("collateral.agreements", co.agreements), ("collateral.byCounterparty", co.byCounterparty), ("collateral.haircuts", co.haircuts), ("collateral.cash", co.cash), ("collateral.securities", co.securities), ("collateral.securitiesByAgreement", co.securitiesByAgreement), ("collateral.calls", co.calls), ("collateral.callsByAgreement", co.callsByAgreement),
       ("limits.nodes", l.nodes), ("limits.counters", l.counters), ("limits.counterparties", l.counterparties),
       ("reconciliation.notifications", s.reconciliation.notifications), ("reconciliation.notified", s.reconciliation.notified), ("reconciliation.statements", s.reconciliation.statements), ("reconciliation.depotBreaks", s.reconciliation.depotBreaks), ("reconciliation.cash", s.reconciliation.cash), ("reconciliation.cashBreaks", s.reconciliation.cashBreaks),
+      ("liquidity.instruments", s.liquidity.instruments), ("liquidity.counterparties", s.liquidity.counterparties),
+      ("feed.feeds", s.feed.feeds), ("feed.sources", s.feed.sources),
+      ("market.markets", s.market.markets), ("market.participants", s.market.participants), ("market.orders", s.market.orders), ("market.ordersByIsin", s.market.ordersByIsin), ("market.ordersByCycle", s.market.ordersByCycle),
+      ("market.cycles", s.market.cycles), ("market.cyclesByIsin", s.market.cyclesByIsin), ("market.fills", s.market.fills), ("market.fillByInstruction", s.market.fillByInstruction),
     ]
   };
   /// One page of an index digested: the entries from the cursor, at most `limit` of them, hashed with their keys.
@@ -2764,7 +2868,403 @@ module {
       ("hedges", debug_show ((s.hedges.policy, s.hedges.count, s.hedges.open, s.hedges.quotes, s.hedges.thetas))), ("attribution", debug_show (s.attribution.rowCount)),
       ("collateral", debug_show ((CollateralCore.status(s.collateral), CollateralCore.policy(s.collateral)))), ("limits", debug_show ((LimitCore.status(s.limits), LimitCore.sweepView(s.limits)))),
       ("reconciliation", debug_show ((ReconciliationCore.status(s.reconciliation), ReconciliationCore.policy(s.reconciliation)))),
+      ("liquidity", debug_show ((LiquidityCore.status(s.liquidity), LiquidityCore.factors(s.liquidity)))),
+      ("feed", debug_show (FeedCore.status(s.feed))), ("market", debug_show (MarketCore.status(s.market))),
     ]
+  };
+
+  // ─── liquidity: the flows, the positions and the ratios read out of the rows ──
+
+  func liquidityErr<X>(e : LQ.Error) : Res<X> { #err(#LiquidityError({ error = e })) };
+  func feedErr<X>(e : FeT.Error) : Res<X> { #err(#FeedError({ error = e })) };
+  func marketErr<X>(e : MkT.Error) : Res<X> { #err(#MarketError({ error = e })) };
+  /// What an order commits, in the market's currency: the units at the reference the cycle would take, or the
+  /// last accepted price, or nothing yet when the feed has none.
+  func orderTotals(s : State, t : MkT.OrderTerms) : [(Text, Nat)] {
+    let ?m = MarketCore.market(s.market, t.isin) else return [];
+    let price = switch (FeedCore.feed(s.feed, t.isin)) { case (?f) f.acceptedMicro; case null 0 };
+    [(m.currency, TreasuryMath.cleanCost(t.units * m.unitNominal, price))]
+  };
+  /// What the ladder and the ratios read of one row: its contractual flows, the position the funding ratio weighs,
+  /// the liquid asset it is, the exposure it carries to its counterparty (and to its issuer for a lot).
+  public type LiquidityItem = {
+    family : Text; id : Nat; kind : Text; cpHash : Nat; cpName : Text; currency : Text; isin : Text;
+    flows : [LQ.Flow]; position : ?LiquidityCore.FundingPosition; liquid : ?LiquidityCore.LiquidAsset; exposure : Nat; issuerExposure : ?(Text, Nat);
+  };
+  func flow(family : Text, id : Nat, kind : Text, currency : Text, day : Nat, amount : Int, counterparty : Text) : LQ.Flow { { family; id; kind; currency; day; amount; counterparty } };
+  func inFunctional(s : State, amount : Nat, currency : Text, day : Nat) : Res<Nat> {
+    let ?functional = CloseCore.functional(s.close) else return #err(#NoFunctionalCurrency);
+    convertOn(s, amount, currency, functional, day)
+  };
+  /// The class of an item's counterparty, or of its instrument for a lot, as declared; the ratios that weigh by
+  /// class refuse an item whose class is missing and name the row. The ladder and the exposures need no class.
+  func cpTypeOf(s : State, cpHash : Nat) : ?LQ.CounterpartyType { LiquidityCore.counterpartyTypeByHash(s.liquidity, cpHash) };
+  func requireClasses(it : LiquidityItem) : ?T.Error {
+    switch (it.position) {
+      case (?p) {
+        if (p.derivative) return null;
+        if (it.isin != "" and p.level == null) return ?#LiquidityError({ error = #UnclassifiedInstrument({ isin = it.isin; deal = it.id }) });
+        if (it.isin == "" and p.counterpartyType == null) return ?#LiquidityError({ error = #UnclassifiedCounterparty({ name = it.cpName; deal = it.id }) });
+        null
+      };
+      case null null;
+    }
+  };
+  func floatingOf(s : State, i : TT.Irs, p : TreasuryMath.SwapPeriod, day : Nat) : Res<Int> {
+    let ?curve = TreasuryCore.curveOn(s.treasury, i.discountCurve, day) else return treasuryErr(#UnknownCurve({ curve = i.discountCurve; day }));
+    let frac = TreasuryMath.ofFraction(DayCount.fraction(i.dayCount, p.start, p.end));
+    if (p.start <= day) {
+      switch (Fixings.fixingOn(s.fixings, i.floatingIndex, p.start)) {
+        case (?f) return #ok(TreasuryMath.legAmount(i.notional, TreasuryMath.ofInt((f : Int) + i.spreadBps), i.dayCount, p));
+        case null {};
+      };
+    };
+    let d0 = if (p.start > day) (p.start - day : Nat) else 0;
+    let fwd = TreasuryMath.add(TreasuryMath.impliedForwardBps(curve.points, d0, p.end - day, frac), TreasuryMath.ofInt(i.spreadBps));
+    #ok(TreasuryMath.roundHalfEven(TreasuryMath.div(TreasuryMath.mul(TreasuryMath.mul(TreasuryMath.ofNat(i.notional), fwd), frac), TreasuryMath.ofNat(TreasuryMath.BPS))))
+  };
+  /// Every open row of every family read into liquidity items on a day, the declared classes beside them where
+  /// they exist: the ladder and the exposures read the items as they are; the ratios refuse an item without its
+  /// class and name the row.
+  public func liquidityItems(s : State, bb : Blocks, js : JCore.State, day : Nat) : Res<[LiquidityItem]> {
+    let out = List.empty<LiquidityItem>();
+    let books = Auth.listBooks(s.authority);
+    func fx(amount : Nat, currency : Text) : Res<Nat> { inFunctional(s, amount, currency, day) };
+    func left(m : Nat) : Nat { if (m > day) m - day else 0 };
+    for (book in books.vals()) {
+      for (r in TreasuryCore.openInBook(s.treasury, book.id).vals()) {
+        let ?kind = treasuryKindOf(bb, r) else continue;
+        let (cpName, _) = treasuryCaptureOf(bb, r.id);
+        let ccy = treasuryRowCurrency(s, r);
+        let flows = List.empty<LQ.Flow>();
+        var position : ?LiquidityCore.FundingPosition = null;
+        var liquid : ?LiquidityCore.LiquidAsset = null;
+        var exposure = 0;
+        var issuerExposure : ?(Text, Nat) = null;
+        switch (kind) {
+          case (#moneyMarket(m)) {
+            let sign : Int = if (m.placement) 1 else -1;
+            let interest = TreasuryMath.simpleInterestTo(m.principal, m.rateBps, m.dayCount, m.start, m.maturity);
+            if (not TreasuryCore.legSettled(r, 0)) List.add(flows, flow("treasury", r.id, "moneyMarket", ccy, m.start, -sign * m.principal, cpName));
+            if (not TreasuryCore.legSettled(r, 1)) List.add(flows, flow("treasury", r.id, "moneyMarket", ccy, m.maturity, sign * (m.principal + interest), cpName));
+            if (TreasuryCore.legSettled(r, 0) and not TreasuryCore.legSettled(r, 1)) {
+              let value = switch (fx(Int.abs((m.principal : Int) + r.accruedPosted), ccy)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+              position := ?{ asset = m.placement; value; residualDays = ?left(m.maturity); level = null; counterpartyType = cpTypeOf(s, r.cpHash); derivative = false };
+              if (m.placement) exposure := value;
+            };
+          };
+          case (#fxForward(f)) {
+            if (not TreasuryCore.legSettled(r, 0)) {
+              let sign : Int = if (f.direction == #buy) 1 else -1;
+              List.add(flows, flow("treasury", r.id, "fxForward", f.base, f.valueDate, sign * f.baseAmount, cpName));
+              List.add(flows, flow("treasury", r.id, "fxForward", f.quote, f.valueDate, -sign * r.secondAmount, cpName));
+            };
+          };
+          case (#fxSwap(x)) {
+            for ((leg, l) in [(0, x.near), (1, x.far)].vals()) {
+              if (not TreasuryCore.legSettled(r, leg)) {
+                let sign : Int = if (l.direction == #buy) 1 else -1;
+                let quote = if (leg == 0) r.secondAmount else TreasuryMath.quoteAmount(l.baseAmount, l.rateMicro);
+                List.add(flows, flow("treasury", r.id, "fxSwap", l.base, l.valueDate, sign * l.baseAmount, cpName));
+                List.add(flows, flow("treasury", r.id, "fxSwap", l.quote, l.valueDate, -sign * quote, cpName));
+              };
+            };
+          };
+          case (#security(t)) {
+            let ?sec = TreasuryCore.security(s.treasury, t.isin) else return treasuryErr(#UnknownSecurity({ isin = t.isin }));
+            if (not TreasuryCore.legSettled(r, 0)) {
+              // the cash of the settlement leg: the clean cost and the coupon accrued to the settlement day
+              let sign : Int = if (t.direction == #buy) -1 else 1;
+              let accrued = TreasuryMath.accruedCoupon(t.nominal, sec.couponBps, TreasuryCore.conventionOf(sec), TreasuryCore.couponPeriodsOf(sec, t.nominal), t.settlement);
+              List.add(flows, flow("treasury", r.id, "security", ccy, t.settlement, sign * (r.secondAmount + accrued), cpName));
+            };
+            if (t.direction == #buy and TreasuryCore.legSettled(r, 0) and r.nominalLeft > 0) {
+              for (c in TreasuryCore.couponPeriodsOf(sec, r.nominalLeft).vals()) { if (c.end > day) List.add(flows, flow("treasury", r.id, "coupon", ccy, c.end, c.amount, sec.issuer)) };
+              List.add(flows, flow("treasury", r.id, "redemption", ccy, sec.maturity, r.nominalLeft, sec.issuer));
+              let level = LiquidityCore.instrumentLevel(s.liquidity, t.isin);
+              let ?price = priceOf(s, t.isin, day) else return liquidityErr(#MissingPrice({ isin = t.isin; day }));
+              let value = switch (fx(TreasuryMath.cleanCost(r.nominalLeft, price), ccy)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+              // a lot pledged or lent is encumbered: only the available part is a liquid asset
+              var available = 0;
+              for ((h, _) in CustodyCore.holdingsOfLot(s.custody, r.id).vals()) available += CustodyCore.available(s.custody, r.id, CustodyCore.depotIdOfHash(s.custody, h));
+              let liquidValue = if (available >= r.nominalLeft) value else { switch (fx(TreasuryMath.cleanCost(available, price), ccy)) { case (#err(e)) return #err(e); case (#ok(v)) v } };
+              switch (level) { case (?l) { if (l != #none) liquid := ?{ level = l; value = liquidValue } }; case null {} };
+              position := ?{ asset = true; value; residualDays = ?left(sec.maturity); level; counterpartyType = null; derivative = false };
+              issuerExposure := ?(sec.issuer, value);
+            };
+          };
+          case (#irs(i)) {
+            for (p in TreasuryCore.swapPeriodsOf(i).vals()) {
+              if (p.end > day) {
+                let fixed = TreasuryMath.legAmount(i.notional, TreasuryMath.ofNat(i.fixedBps), i.dayCount, p);
+                let floating = switch (floatingOf(s, i, p, day)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+                List.add(flows, flow("treasury", r.id, "irs", i.currency, p.end, if (i.payFixed) floating - fixed else fixed - floating, cpName));
+              };
+            };
+          };
+          case (#fxOption(o)) {
+            if (not TreasuryCore.legSettled(r, 0)) List.add(flows, flow("treasury", r.id, "fxOption", o.quote, o.start, if (o.bought) -(o.premium : Int) else o.premium, cpName));
+          };
+        };
+        // a derivative's mark is its position: an asset when positive, a liability when negative
+        if (r.kind == 2 or r.kind == 3 or r.kind == 5 or r.kind == 6) {
+          if (r.markPosted != 0) {
+            let value = switch (fx(Int.abs(r.markPosted), resultCurrency(s, bb, r.id))) { case (#err(e)) return #err(e); case (#ok(v)) v };
+            position := ?{ asset = r.markPosted > 0; value; residualDays = null; level = null; counterpartyType = null; derivative = true };
+            if (r.markPosted > 0) exposure := value;
+          };
+        };
+        List.add(out, { family = "treasury"; id = r.id; kind = TreasuryCore.kindTextOf(r.kind); cpHash = r.cpHash; cpName; currency = ccy; isin = if (r.kind == 4) r.isin else ""; flows = List.toArray(flows); position; liquid; exposure; issuerExposure });
+      };
+      for (c in CallCore.openInBook(s.calls, book.id).vals()) {
+        let (cpName, _, _) = callOpeningOf(bb, c.id);
+        let placement = (c.flags & CallCore.F_PLACEMENT) != 0;
+        let sign : Int = if (placement) 1 else -1;
+        let flows = List.empty<LQ.Flow>();
+        var position : ?LiquidityCore.FundingPosition = null;
+        var exposure = 0;
+        if ((c.flags & CallCore.F_FUNDED) == 0) {
+          List.add(flows, flow("call", c.id, "call", c.currency, c.start, -sign * c.balance, cpName));
+        } else {
+          // repayable on the notice day: the recorded one, or the notice served today
+          let due = if (c.repayDay > 0) c.repayDay else nextBusinessDay(js)(day + Nat.max(1, c.noticeDays));
+          let amount : Int = (c.balance : Int) + c.accruedPosted;
+          List.add(flows, flow("call", c.id, "call", c.currency, due, sign * amount, cpName));
+          let value = switch (fx(Int.abs(amount), c.currency)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+          position := ?{ asset = placement; value; residualDays = ?left(due); level = null; counterpartyType = cpTypeOf(s, c.cpHash); derivative = false };
+          if (placement) exposure := value;
+        };
+        List.add(out, { family = "call"; id = c.id; kind = "call"; cpHash = c.cpHash; cpName; currency = c.currency; isin = ""; flows = List.toArray(flows); position; liquid = null; exposure; issuerExposure = null });
+      };
+      for (r in FinancingCore.openReposInBook(s.financing, book.id).vals()) {
+        let (cpName, _, _) = repoOpeningOf(bb, r.id);
+        let sign : Int = if (r.reverse) 1 else -1;   // the cash lender's side: a reverse repo lends cash out and gets it back
+        let closeDay = if (r.maturity == 0) nextBusinessDay(js)(day + 1) else r.maturity;
+        let flows = List.empty<LQ.Flow>();
+        var position : ?LiquidityCore.FundingPosition = null;
+        var exposure = 0;
+        if (r.state == #open) List.add(flows, flow("repo", r.id, "repo", r.currency, r.start, -sign * r.cash, cpName));
+        let interest = Int.abs(FinancingCore.repoInterestTarget(r, closeDay));
+        List.add(flows, flow("repo", r.id, "repo", r.currency, closeDay, sign * (r.cash + interest), cpName));
+        // margin cash held goes back at the close; margin cash given comes back
+        if (r.marginCash != 0) List.add(flows, flow("repo", r.id, "margin", r.currency, closeDay, -r.marginCash, cpName));
+        if (r.state == #started) {
+          let value = switch (fx(Int.abs((r.cash : Int) + r.accruedPosted), r.currency)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+          position := ?{ asset = r.reverse; value; residualDays = ?left(closeDay); level = null; counterpartyType = cpTypeOf(s, r.cpHash); derivative = false };
+          if (r.reverse) exposure := value;
+        };
+        List.add(out, { family = "repo"; id = r.id; kind = "repo"; cpHash = r.cpHash; cpName; currency = r.currency; isin = ""; flows = List.toArray(flows); position; liquid = null; exposure; issuerExposure = null });
+      };
+      for (l in FinancingCore.openLoansInBook(s.financing, book.id).vals()) {
+        let (cpName, _, _) = loanOpeningOf(bb, l.id);
+        let flows = List.empty<LQ.Flow>();
+        var position : ?LiquidityCore.FundingPosition = null;
+        let returnDay = if (l.returnDay > 0) l.returnDay else nextBusinessDay(js)(day + Nat.max(1, l.noticeDays));
+        if (l.state != #open and l.cashCollateral > 0) {
+          let rebate = Int.abs(FinancingCore.loanRebateTarget(l, returnDay));
+          List.add(flows, flow("loan", l.id, "loan", l.currency, returnDay, -((l.cashCollateral + rebate) : Int), cpName));
+          let value = switch (fx(l.cashCollateral, l.currency)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+          position := ?{ asset = false; value; residualDays = ?left(returnDay); level = null; counterpartyType = cpTypeOf(s, l.cpHash); derivative = false };
+        };
+        if (l.state != #open) List.add(flows, flow("loan", l.id, "fee", l.currency, returnDay, Int.abs(FinancingCore.loanFeeTarget(l, returnDay)), cpName));
+        let value = switch (fx(FinancingCore.loanValue(l), l.currency)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        List.add(out, { family = "loan"; id = l.id; kind = "loan"; cpHash = l.cpHash; cpName; currency = l.currency; isin = ""; flows = List.toArray(flows); position; liquid = null; exposure = if (l.state == #open) 0 else value; issuerExposure = null });
+      };
+    };
+    // collateral cash: what the desk holds is callable overnight, what it posted comes back on demand
+    for (a in CollateralCore.agreements(s.collateral).vals()) {
+      for (c in CollateralCore.cashOf(s.collateral, a.id).vals()) {
+        let net : Int = (c.received : Int) - c.given;
+        if (net == 0) continue;
+        let value = switch (fx(Int.abs(net), c.currency)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        List.add(out, { family = "collateral"; id = 0; kind = "cash"; cpHash = a.cpHash; cpName = a.counterparty; currency = c.currency; isin = "";
+          flows = [flow("collateral", 0, "cash", c.currency, nextBusinessDay(js)(day + 1), -net, a.counterparty)];
+          position = ?{ asset = net < 0; value; residualDays = null; level = null; counterpartyType = cpTypeOf(s, a.cpHash); derivative = false }; liquid = null; exposure = if (net < 0) value else 0; issuerExposure = null });
+      };
+    };
+    #ok(List.toArray(out))
+  };
+  /// The ladder: every flow in its bucket by days from the day, per currency.
+  public func liquidityLadder(s : State, bb : Blocks, js : JCore.State, day : Nat) : Res<LQ.LadderView> {
+    let items = switch (liquidityItems(s, bb, js, day)) { case (#err(e)) return #err(e); case (#ok(x)) x };
+    let sums = Map.empty<Text, (Nat, Nat, Nat)>();
+    var flows = 0;
+    for (it in items.vals()) {
+      for (f in it.flows.vals()) {
+        let key = f.currency # "/" # LQ.bucketOf(if (f.day > day) f.day - day else 0);
+        let (i, o, n) = switch (Map.get(sums, Text.compare, key)) { case (?v) v; case null (0, 0, 0) };
+        Map.add(sums, Text.compare, key, (i + (if (f.amount > 0) Int.abs(f.amount) else 0), o + (if (f.amount < 0) Int.abs(f.amount) else 0), n + 1));
+        flows += 1;
+      };
+    };
+    let rows = List.empty<LQ.LadderRow>();
+    for ((key, (i, o, n)) in Map.entries(sums)) {
+      let parts = Text.split(key, #char '/');
+      let ?currency = parts.next() else continue; let ?bucket = parts.next() else continue;
+      List.add(rows, { currency; bucket; inflows = i; outflows = o; net = (i : Int) - o; flows = n });
+    };
+    #ok({ day; height = s.height; rows = List.toArray(rows); positions = items.size(); flows })
+  };
+  public func liquidityCoverage(s : State, bb : Blocks, js : JCore.State, day : Nat) : Res<LQ.LcrView> {
+    let ?f = LiquidityCore.factors(s.liquidity) else return liquidityErr(#NoFactors);
+    let ?functional = CloseCore.functional(s.close) else return #err(#NoFunctionalCurrency);
+    let items = switch (liquidityItems(s, bb, js, day)) { case (#err(e)) return #err(e); case (#ok(x)) x };
+    let assets = List.empty<LiquidityCore.LiquidAsset>();
+    let flows = List.empty<LiquidityCore.WeighedFlow>();
+    for (it in items.vals()) {
+      switch (requireClasses(it)) { case (?e) return #err(e); case null {} };
+      switch (it.liquid) { case (?a) List.add(assets, a); case null {} };
+      let derivative = it.kind == "fxForward" or it.kind == "fxSwap" or it.kind == "irs" or it.kind == "fxOption";
+      for (x in it.flows.vals()) {
+        if (x.day <= day + 30) {
+          let amount = switch (convertSigned(s, x.amount, x.currency, functional, day)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+          // a coupon or a redemption is the issuer's, weighed as a receivable from the issuer's type; a derivative at 100 percent
+          let t : ?LQ.CounterpartyType = if (derivative) null else { switch (LiquidityCore.counterpartyType(s.liquidity, x.counterparty)) { case (?t) ?t; case null return liquidityErr(#UnclassifiedCounterparty({ name = x.counterparty; deal = it.id })) } };
+          List.add(flows, { counterpartyType = t; amount });
+        };
+      };
+    };
+    switch (LiquidityCore.lcr(f, List.toArray(assets), List.toArray(flows))) {
+      case (#err(e)) liquidityErr(e);
+      case (#ok(r)) #ok({ day; height = s.height; currency = functional; level1 = r.level1; level2A = r.level2A; level2B = r.level2B; capAdjustment = r.capAdjustment; hqla = r.hqla; outflows = r.outflows; inflows = r.inflows; inflowsCounted = r.inflowsCounted; netOutflows = r.netOutflows; ratioBps = r.ratioBps; positions = items.size() });
+    }
+  };
+  public func netStableFunding(s : State, bb : Blocks, js : JCore.State, day : Nat) : Res<LQ.NsfrView> {
+    let ?f = LiquidityCore.factors(s.liquidity) else return liquidityErr(#NoFactors);
+    let ?(capCcy, capital) = LiquidityCore.capital(s.liquidity) else return liquidityErr(#NoCapital);
+    let ?functional = CloseCore.functional(s.close) else return #err(#NoFunctionalCurrency);
+    let cap = switch (convertOn(s, capital, capCcy, functional, day)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+    let items = switch (liquidityItems(s, bb, js, day)) { case (#err(e)) return #err(e); case (#ok(x)) x };
+    let positions = List.empty<LiquidityCore.FundingPosition>();
+    for (it in items.vals()) { switch (requireClasses(it)) { case (?e) return #err(e); case null {} }; switch (it.position) { case (?p) List.add(positions, p); case null {} } };
+    switch (LiquidityCore.nsfr(f, cap, List.toArray(positions))) {
+      case (#err(e)) liquidityErr(e);
+      case (#ok(r)) #ok({ day; height = s.height; currency = functional; capital = cap; asf = r.asf; rsf = r.rsf; ratioBps = r.ratioBps; positions = List.size(positions) });
+    }
+  };
+  /// The exposure to every counterparty and issuer, summed by name, with the group the limits record.
+  public func largeExposures(s : State, bb : Blocks, js : JCore.State, day : Nat) : Res<LQ.LargeExposuresView> {
+    let ?f = LiquidityCore.factors(s.liquidity) else return liquidityErr(#NoFactors);
+    let ?(capCcy, capital) = LiquidityCore.capital(s.liquidity) else return liquidityErr(#NoCapital);
+    let ?functional = CloseCore.functional(s.close) else return #err(#NoFunctionalCurrency);
+    let cap = switch (convertOn(s, capital, capCcy, functional, day)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+    let items = switch (liquidityItems(s, bb, js, day)) { case (#err(e)) return #err(e); case (#ok(x)) x };
+    let sums = Map.empty<Text, Nat>();
+    func add(name : Text, v : Nat) { if (v > 0) { let cur = switch (Map.get(sums, Text.compare, name)) { case (?x) x; case null 0 }; Map.add(sums, Text.compare, name, cur + v) } };
+    for (it in items.vals()) { add(it.cpName, it.exposure); switch (it.issuerExposure) { case (?(issuer, v)) add(issuer, v); case null {} } };
+    let rows = Array.map<(Text, Nat), (Text, Text, Nat)>(Map.toArray(sums), func((name, v)) { (name, switch (LimitCore.counterparty(s.limits, name)) { case (?c) c.group; case null name }, v) });
+    let le = LiquidityCore.largeExposures(f, cap, rows);
+    #ok({ day; height = s.height; currency = functional; capital = cap; boundBps = f.largeExposureBps; rows = le.rows; breaches = le.breaches })
+  };
+  /// The treasury liquidity return: the ladder, the two ratios and the large exposures as one document, its
+  /// hash beside it; the same state and day give the same bytes.
+  public func liquidityReturn(s : State, bb : Blocks, js : JCore.State, day : Nat) : Res<{ height : Nat; day : Nat; xml : Text; hash : Blob }> {
+    let ladder = switch (liquidityLadder(s, bb, js, day)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+    let lcr = switch (liquidityCoverage(s, bb, js, day)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+    let nsfr = switch (netStableFunding(s, bb, js, day)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+    let le = switch (largeExposures(s, bb, js, day)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+    func n(x : Nat) : Text { Nat.toText(x) };
+    func i(x : Int) : Text { (if (x < 0) "-" else "") # Nat.toText(Int.abs(x)) };
+    let rows = Array.sort<LQ.LadderRow>(ladder.rows, func(a, b) { switch (Text.compare(a.currency, b.currency)) { case (#equal) Text.compare(a.bucket, b.bucket); case o o } });
+    var body = "";
+    for (r in rows.vals()) body #= "<Bucket currency=\"" # r.currency # "\" name=\"" # r.bucket # "\" inflows=\"" # n(r.inflows) # "\" outflows=\"" # n(r.outflows) # "\" net=\"" # i(r.net) # "\" flows=\"" # n(r.flows) # "\"/>";
+    var exposures = "";
+    for (r in le.rows.vals()) exposures #= "<Exposure counterparty=\"" # Xml.escape(r.counterparty) # "\" group=\"" # Xml.escape(r.group) # "\" exposure=\"" # n(r.exposure) # "\" shareBps=\"" # n(r.shareBps) # "\" breach=\"" # (if (r.breach) "true" else "false") # "\"/>";
+    let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Return xmlns=\"urn:thebes:cbe:treasury-liquidity:1\" day=\"" # n(day) # "\" height=\"" # n(s.height) # "\" currency=\"" # lcr.currency # "\">"
+      # "<Ladder positions=\"" # n(ladder.positions) # "\" flows=\"" # n(ladder.flows) # "\">" # body # "</Ladder>"
+      # "<LCR level1=\"" # n(lcr.level1) # "\" level2A=\"" # n(lcr.level2A) # "\" level2B=\"" # n(lcr.level2B) # "\" capAdjustment=\"" # n(lcr.capAdjustment) # "\" hqla=\"" # n(lcr.hqla) # "\" outflows=\"" # n(lcr.outflows) # "\" inflows=\"" # n(lcr.inflows) # "\" inflowsCounted=\"" # n(lcr.inflowsCounted) # "\" netOutflows=\"" # n(lcr.netOutflows) # "\" ratioBps=\"" # n(lcr.ratioBps) # "\"/>"
+      # "<NSFR capital=\"" # n(nsfr.capital) # "\" asf=\"" # n(nsfr.asf) # "\" rsf=\"" # n(nsfr.rsf) # "\" ratioBps=\"" # n(nsfr.ratioBps) # "\"/>"
+      # "<LargeExposures capital=\"" # n(le.capital) # "\" boundBps=\"" # n(le.boundBps) # "\" breaches=\"" # n(le.breaches) # "\">" # exposures # "</LargeExposures></Return>";
+    #ok({ height = s.height; day; xml; hash = Sha256.fromBlob(#sha256, Text.encodeUtf8(xml)) })
+  };
+
+
+  // ─── the market cycle: what the driver records at each step ──
+
+  public func marketRow(s : State, isin : Text) : Res<MarketCore.MarketRow> { switch (MarketCore.market(s.market, isin)) { case (?m) #ok(m); case null marketErr(#NoMarket({ isin })) } };
+  public func cycleRow(s : State, id : Nat) : Res<MarketCore.CycleRow> { switch (MarketCore.cycle(s.market, id)) { case (?c) #ok(c); case null marketErr(#UnknownCycle({ cycle = id })) } };
+  /// The terms an order was staged with, from its block.
+  public func orderTermsOf(bb : Blocks, id : Nat) : ?(MkT.OrderTerms, Principal) {
+    switch (bb.get(id)) { case (?b) { switch (b.event) { case (#market(#orderStaged(x))) ?(x.terms, x.trader); case (_) null } }; case null null }
+  };
+  /// The approver a cycle was opened with: the checker of the opening, whose acceptance covers the fills' captures.
+  public func cycleApproverOf(bb : Blocks, cycleId : Nat) : ?Principal {
+    // the opening is the executed command's event; the approver is the command's, recorded on the approval before it
+    var i = cycleId;
+    while (i > 0) {
+      i -= 1;
+      switch (bb.get(i)) {
+        case (?b) { switch (b.event) { case (#commandApproved(a)) return ?a.checker; case (#commandProposed(_)) return null; case (_) {} } };
+        case null return null;
+      };
+      if (cycleId - i > 8) return null;
+    };
+    null
+  };
+  /// A fill of the desk's read from the engine: the desk's own order named by the engine's id, the counterparty the
+  /// other party.
+  public func fillEventOf(s : State, c : MarketCore.CycleRow, me : Principal, o : { seq : Nat; window : Nat; buyId : Nat; sellId : Nat; buyer : Principal; seller : Principal; price : Nat; qty : Nat }, day : Nat) : ?[T.Event] {
+    let mineBuy = Principal.equal(o.buyer, me);
+    let mineSell = Principal.equal(o.seller, me);
+    if (not mineBuy and not mineSell) return null;
+    let engineOrder = if (mineBuy) o.buyId else o.sellId;
+    let counterparty = if (mineBuy) o.seller else o.buyer;
+    let ?order = Array.find<MarketCore.OrderRow>(MarketCore.ordersOfCycle(s.market, c.id), func(x) { x.engineOrder == engineOrder }) else return null;
+    let filled : T.Event = #market(#filled({ cycle = c.id; order = order.id; seq = o.seq; price = o.price; units = o.qty; counterparty; day }));
+    switch (MarketCore.participant(s.market, c.isin, counterparty)) {
+      case (?_) ?[filled];
+      case null ?[filled, #market(#fillUnattributed({ cycle = c.id; seq = o.seq; counterparty; day }))];
+    }
+  };
+  /// A fill captured as a security deal: the units times the face per unit at the price the fill's cash implies
+  /// once the coupon accrued to the settlement day is taken out, the clean cost exact, so the settlement leg's cash
+  /// is the engine's to the minor unit; the book's depot holds the lot.
+  public func planFillCapture(s : State, bb : Blocks, c : MarketCore.CycleRow, m : MarketCore.MarketRow, f : MarketCore.FillRow, approver : ?Principal, day : Nat) : Res<[T.Event]> {
+    if (f.state != #recorded and f.state != #unattributed) return marketErr(#CycleNotIn({ cycle = c.id; state = MkT.fillStateText(f.state); wanted = "recorded" }));
+    let ?p = MarketCore.participant(s.market, c.isin, f.counterparty) else return marketErr(#UnknownFill({ cycle = c.id; seq = f.seq }));
+    let ?(terms, trader) = orderTermsOf(bb, f.order) else return marketErr(#UnknownOrder({ order = f.order }));
+    let ?sec = TreasuryCore.security(s.treasury, c.isin) else return treasuryErr(#UnknownSecurity({ isin = c.isin }));
+    let ctx = switch (treasuryCtx(s)) { case (#err(e)) return #err(e); case (#ok(x)) x };
+    let nominal = f.units * m.unitNominal;
+    let cash = f.price * f.units;
+    let accrued = TreasuryMath.accruedCoupon(nominal, sec.couponBps, TreasuryCore.conventionOf(sec), TreasuryCore.couponPeriodsOf(sec, nominal), c.day);
+    let ?(priceMicro, clean) = MarketCore.impliedPrice(cash, accrued, nominal) else return marketErr(#InvalidOrder({ reason = "the fill's cash does not cover the coupon accrued to the settlement day" }));
+    let kind : TT.DealKind = #security({ isin = c.isin; direction = switch (terms.side) { case (#buy) #buy; case (#sell) #sell }; nominal; priceMicro; settlement = c.day; classification = terms.classification; cash = terms.cash; priceCurve = c.isin; venue = ?Principal.toText(m.engine) });
+    let reference = terms.reference # "/" # Nat.toText(f.seq);
+    switch (TreasuryCore.planCapture(s.treasury, s.height, terms.book, p.counterparty, kind, reference, trader, day, approver, ctx, treasuryTerms(bb))) {
+      case (#err(e)) treasuryErr(e);
+      case (#ok(r)) {
+        let captured : T.Event = switch (r.ev) { case (#dealCaptured(x)) #treasury(#dealCaptured({ x with secondAmount = clean })); case (other) #treasury(other) };
+        let extras = Array.map<TT.TreasuryEvent, T.Event>(r.extras, func(e) { #treasury(e) });
+        let depot : [T.Event] = switch (CustodyCore.bookDepotOf(s.custody, terms.book)) { case (?d) [#custody(#dealDepotAssigned({ deal = s.height; depot = d; day }))]; case null [] };
+        #ok(Array.concat<T.Event>(Array.concat<T.Event>([captured], extras), Array.concat<T.Event>(depot, [#market(#fillCaptured({ cycle = c.id; seq = f.seq; deal = s.height; day }))])))
+      };
+    }
+  };
+  /// A captured fill instructed on the engine's ledgers for the engine's amounts.
+  public func planFillInstruction(s : State, bb : Blocks, c : MarketCore.CycleRow, m : MarketCore.MarketRow, f : MarketCore.FillRow, day : Nat) : Res<[T.Event]> {
+    if (f.state != #captured) return marketErr(#CycleNotIn({ cycle = c.id; state = MkT.fillStateText(f.state); wanted = "captured" }));
+    let r = switch (treasuryRow(s, f.deal)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+    let t = switch (treasuryKind(bb, r)) { case (#err(e)) return #err(e); case (#ok(#security(t))) t; case (#ok(_)) return marketErr(#UnknownFill({ cycle = c.id; seq = f.seq })) };
+    let ?(terms, _) = orderTermsOf(bb, f.order) else return marketErr(#UnknownOrder({ order = f.order }));
+    switch (SettlementCore.planInstructMatched(s.settlement, r, t, m.sharesLedger, m.cashLedger, f.units, f.price * f.units, f.counterparty, terms.reference # "/" # Nat.toText(f.seq), day)) {
+      case (#err(e)) settlementErr(e);
+      case (#ok(ev)) #ok([#settlement(ev), #market(#fillInstructed({ cycle = c.id; seq = f.seq; deal = f.deal; instruction = s.height; day }))]);
+    }
+  };
+  /// The engine's trade set on a fill's instruction, so the settlement's driver observes it.
+  public func planFillTrade(s : State, c : MarketCore.CycleRow, f : MarketCore.FillRow, tradeId : Nat, day : Nat) : Res<[T.Event]> {
+    if (f.state != #instructed or f.instruction == 0) return marketErr(#CycleNotIn({ cycle = c.id; state = MkT.fillStateText(f.state); wanted = "instructed" }));
+    if (tradeId == 0) return marketErr(#EngineRefused({ cycle = c.id; step = "tradeIdForMatch"; reason = "no trade" }));
+    #ok([#settlement(#tradeAssigned({ instruction = f.instruction; tradeId; day })), #market(#fillTradeSet({ cycle = c.id; seq = f.seq; tradeId; day }))])
+  };
+  public func planCycleClose(s : State, c : MarketCore.CycleRow, day : Nat) : Res<T.Event> {
+    let unfilled = Array.map<MarketCore.OrderRow, Nat>(Array.filter<MarketCore.OrderRow>(MarketCore.ordersOfCycle(s.market, c.id), func(o) { o.state == #unfilled or o.state == #partlyFilled }), func(o) { o.id });
+    #ok(#market(#cycleClosed({ cycle = c.id; fills = c.fills; unfilled; day })))
+  };
+  public func orderView(s : State, bb : Blocks, o : MarketCore.OrderRow) : MkT.OrderView {
+    let (trader, reference) = switch (orderTermsOf(bb, o.id)) { case (?(t, tr)) (tr, t.reference); case null (Principal.fromBlob(""), "") };
+    MarketCore.orderView(o, trader, reference)
   };
 
   // ═══════════════════════════════════════════════════════

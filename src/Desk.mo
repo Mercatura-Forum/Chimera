@@ -77,6 +77,13 @@ import LT "LimitTypes";
 import LimitCore "LimitCore";
 import RT "ReconciliationTypes";
 import ReconciliationCore "ReconciliationCore";
+import LQ "LiquidityTypes";
+import LiquidityCore "LiquidityCore";
+import FeT "FeedTypes";
+import FeedCore "FeedCore";
+import MkT "MarketTypes";
+import MarketCore "MarketCore";
+import MarketMessages "MarketMessages";
 import IC "mo:core/InternetComputer";
 import DT "mo:tachyon/DvpTypes";
 import ICRC "mo:tachyon/ICRC";
@@ -570,7 +577,11 @@ shared (initMsg) persistent actor class Desk(init : {
   //  TREASURY (Manticore's reads, verbatim in shape)
   // ═══════════════════════════════════════════════════════
 
+  /// A row read is refused before any row is looked up when the caller reads no book at all, so a stranger never
+  /// learns whether a row exists.
+  func requireReader(caller : Principal) : ?T.Error { switch (readScope(caller)) { case (?books) { if (books.size() == 0) ?#NoReadableBook else null }; case null null } };
   func treasuryView(caller : Principal, id : Nat) : Result.Result<?TT.DealView, T.Error> {
+    switch (requireReader(caller)) { case (?e) return #err(e); case null {} };
     switch (TreasuryCore.row(desk.treasury, id)) {
       case null #ok(null);
       case (?r) { if (not Auth.mayReadBook(readScope(caller), r.book)) return #err(#OutsideBookScope({ book = r.book })); #ok(?Core.dealView(desk, deskBlocks(), r)) };
@@ -613,6 +624,7 @@ shared (initMsg) persistent actor class Desk(init : {
 
   // ── call and notice money ──
   func callViewOf(caller : Principal, id : Nat) : Result.Result<?CallT.View, T.Error> {
+    switch (requireReader(caller)) { case (?e) return #err(e); case null {} };
     switch (CallCore.row(desk.calls, id)) {
       case null #ok(null);
       case (?r) { if (not Auth.mayReadBook(readScope(caller), r.book)) return #err(#OutsideBookScope({ book = r.book })); #ok(?Core.callView(deskBlocks(), r)) };
@@ -749,6 +761,22 @@ shared (initMsg) persistent actor class Desk(init : {
     getTrade : shared query (Nat) -> async ?DT.TradeView;
     allEvents : shared query () -> async [DT.AuditEvent];
     auditRoot : shared query () -> async ?Blob;
+    tradeIdForMatch : shared query (Principal, Nat) -> async ?Nat;
+  };
+  /// Tachyon's matching engine as the cycle's driver calls it.
+  type EngineOrderStatus = { #Open; #PartiallyFilled; #Filled; #Cancelled };
+  type EngineObligation = { seq : Nat; window : Nat; buyId : Nat; sellId : Nat; buyer : Principal; seller : Principal; price : Nat; qty : Nat; dvpTradeId : ?Nat; settled : Bool };
+  type EngineClear = { window : Nat; clearingPrice : ?Nat; targetVolume : Nat; fillsThisCall : Nat; totalFilled : Nat; complete : Bool; chunks : Nat; note : Text };
+  type Engine_ = actor {
+    submitOrder : ({ side : { #buy; #sell }; limitPrice : Nat; qty : Nat; allOrNone : Bool }) -> async Result.Result<{ orderId : Nat; status : EngineOrderStatus; reservedShares : Nat; reservedCash : Nat; note : Text }, Text>;
+    clearWindow : () -> async Result.Result<EngineClear, Text>;
+    continueClear : (Nat) -> async Result.Result<EngineClear, Text>;
+    settleObligation : (Nat, Nat) -> async Result.Result<Text, Text>;
+    cancelOrder : (Nat) -> async Result.Result<Text, Text>;
+    getCurrentWindow : shared query () -> async Nat;
+    pendingClearStatus : shared query (Nat) -> async ?{ window : Nat; clearingPrice : Nat; targetVolume : Nat; filled : Nat; i : Nat; j : Nat; chunks : Nat };
+    reservationOf : shared query (Principal) -> async { shares : Nat; cash : Nat };
+    allObligations : shared query () -> async [EngineObligation];
   };
   type Ledger_ = actor {
     icrc1_fee : shared query () -> async Nat;
@@ -973,6 +1001,7 @@ shared (initMsg) persistent actor class Desk(init : {
   func repoView(r : FinancingCore.RepoRow) : FT.RepoView { let (cp, reference, _) = Core.repoOpeningOf(deskBlocks(), r.id); FinancingCore.repoView(r, cp, reference) };
   func loanView(r : FinancingCore.LoanRow) : FT.LoanView { let (cp, reference, _) = Core.loanOpeningOf(deskBlocks(), r.id); FinancingCore.loanView(r, cp, reference) };
   public shared query ({ caller }) func repo(id : Nat) : async Result.Result<?FT.RepoView, T.Error> {
+    switch (requireReader(caller)) { case (?e) return #err(e); case null {} };
     switch (FinancingCore.repo(desk.financing, id)) {
       case (?r) { if (not Auth.mayReadBook(readScope(caller), r.book)) return #err(#OutsideBookScope({ book = r.book })); #ok(?repoView(r)) };
       case null #ok(null);
@@ -984,6 +1013,7 @@ shared (initMsg) persistent actor class Desk(init : {
   };
   public query func repoPledges(id : Nat) : async [(Nat, Nat)] { FinancingCore.lotsOfRepo(desk.financing, id) };
   public shared query ({ caller }) func loan(id : Nat) : async Result.Result<?FT.LoanView, T.Error> {
+    switch (requireReader(caller)) { case (?e) return #err(e); case null {} };
     switch (FinancingCore.loan(desk.financing, id)) {
       case (?r) { if (not Auth.mayReadBook(readScope(caller), r.book)) return #err(#OutsideBookScope({ book = r.book })); #ok(?loanView(r)) };
       case null #ok(null);
@@ -1001,6 +1031,7 @@ shared (initMsg) persistent actor class Desk(init : {
   public query func hedges() : async [VT.HedgeView] { Array.map<HedgeCore.Row, VT.HedgeView>(HedgeCore.hedges(desk.hedges), HedgeCore.view) };
   /// A deal's result attributed by period: new, carry, market move and the whole.
   public shared query ({ caller }) func attribution(deal : Nat) : async Result.Result<[VT.AttributionView], T.Error> {
+    switch (requireReader(caller)) { case (?e) return #err(e); case null {} };
     switch (TreasuryCore.row(desk.treasury, deal)) { case (?r) { if (not Auth.mayReadBook(readScope(caller), r.book)) return #err(#OutsideBookScope({ book = r.book })) }; case null {} };
     #ok(Attribution.rowsOfDeal(desk.attribution, deal, Core.resultCurrency(desk, deskBlocks(), deal)))
   };
@@ -1012,6 +1043,7 @@ shared (initMsg) persistent actor class Desk(init : {
   };
   /// The desk's own mark of a deal at a day from that day's data, or from another day's (the theta's reading).
   public shared query ({ caller }) func markOf(deal : Nat, day : Nat, dataDay : Nat) : async Result.Result<?Int, T.Error> {
+    switch (requireReader(caller)) { case (?e) return #err(e); case null {} };
     switch (TreasuryCore.row(desk.treasury, deal)) { case (?r) { if (not Auth.mayReadBook(readScope(caller), r.book)) return #err(#OutsideBookScope({ book = r.book })) }; case null {} };
     Core.markOf(desk, deskBlocks(), deal, day, dataDay)
   };
@@ -1059,6 +1091,244 @@ shared (initMsg) persistent actor class Desk(init : {
   /// The reconciliation report of a day: canonical text, its hash, at the log's height; the same state and day
   /// give the same bytes, so a reader re-derives it from the logs.
   public query func reconciliationReport(day : Nat) : async { height : Nat; day : Nat; json : Text; hash : Blob } { Core.reconciliationReport(desk, day) };
+
+
+  // ═══════════════════════════════════════════════════════
+  //  THE MARKET CYCLE: THE DRIVER AND THE READS
+  // ═══════════════════════════════════════════════════════
+
+  transient let drivingCycles = Map.empty<Nat, ()>();
+  func marketErr<X>(e : MkT.Error) : Result.Result<X, T.Error> { #err(#MarketError({ error = e })) };
+  func cycleRefused(c : MarketCore.CycleRow, step : Text, reason : Text, today : Nat) : Result.Result<MkT.CycleView, T.Error> {
+    ignore commitDesk(me(), #market(#callRefused({ cycle = c.id; step; reason; day = today })), null);
+    marketErr(#EngineRefused({ cycle = c.id; step; reason }))
+  };
+  func cycleNow(id : Nat) : MkT.CycleView { switch (MarketCore.cycle(desk.market, id)) { case (?c) MarketCore.cycleView(c); case null Runtime.trap("Desk: the cycle vanished") } };
+  func commitAll(evs : [T.Event]) { for (ev in evs.vals()) ignore commitDesk(me(), ev, null) };
+  /// A page of the engine's obligations from a cursor: in sequence, at most a page; complete when the page is short.
+  func readPage(all : [EngineObligation], from : Nat) : ([EngineObligation], Nat, Bool) {
+    let page = Array.sort<EngineObligation>(Array.filter<EngineObligation>(all, func(o) { o.seq >= from }), func(a, b) { Nat.compare(a.seq, b.seq) });
+    let taken = if (page.size() > MarketCore.FILLS_PER_READ) Array.sliceToArray<EngineObligation>(page, 0, MarketCore.FILLS_PER_READ) else page;
+    var through = from;
+    for (o in taken.vals()) through := o.seq + 1;
+    (taken, through, page.size() <= MarketCore.FILLS_PER_READ)
+  };
+  /// The desk's fills among a page recorded, each captured and instructed in the same message where its participant
+  /// is named, and the page's cursor recorded.
+  func recordFills(c : MarketCore.CycleRow, m : MarketCore.MarketRow, taken : [EngineObligation], through : Nat, complete : Bool, today : Nat) {
+    let approver = Core.cycleApproverOf(deskBlocks(), c.id);
+    for (o in taken.vals()) {
+      switch (Core.fillEventOf(desk, c, me(), o, today)) {
+        case (?evs) {
+          commitAll(evs);
+          // a fill against a named participant is captured and instructed in the same message
+          switch (MarketCore.fill(desk.market, c.id, o.seq)) {
+            case (?f) {
+              if (f.state == #recorded) {
+                switch (Core.planFillCapture(desk, deskBlocks(), c, m, f, approver, today)) {
+                  case (#ok(evs2)) {
+                    commitAll(evs2);
+                    switch (MarketCore.fill(desk.market, c.id, o.seq)) {
+                      case (?f2) {
+                        switch (Core.planFillInstruction(desk, deskBlocks(), c, m, f2, today)) {
+                          case (#ok(evs3)) commitAll(evs3);
+                          case (#err(e)) ignore commitDesk(me(), #market(#callRefused({ cycle = c.id; step = "instruct " # Nat.toText(o.seq); reason = debug_show e; day = today })), null);
+                        };
+                      };
+                      case null {};
+                    };
+                  };
+                  case (#err(e)) ignore commitDesk(me(), #market(#callRefused({ cycle = c.id; step = "capture " # Nat.toText(o.seq); reason = debug_show e; day = today })), null);
+                };
+              };
+            };
+            case null {};
+          };
+        };
+        case null {};
+      };
+    };
+    ignore commitDesk(me(), #market(#fillsRead({ cycle = c.id; through; fills = taken.size(); complete; day = today })), null);
+  };
+  /// The next step of a cycle opened through four eyes: the staged orders handed to the engine one per call, the
+  /// clear advanced a chunk at a time, the fills read back in bounded pages and each captured and instructed, the
+  /// engine's trade set on each instruction, the cycle closed. Open by design: every step is the cycle's own, the
+  /// engine's replies are recorded as they come, and a caller chooses nothing.
+  public shared func driveMarketCycle(id : Nat) : async Result.Result<MkT.CycleView, T.Error> {
+    let c = switch (Core.cycleRow(desk, id)) { case (#err(e)) return #err(e); case (#ok(c)) c };
+    let m = switch (Core.marketRow(desk, c.isin)) { case (#err(e)) return #err(e); case (#ok(m)) m };
+    if (Map.containsKey(drivingCycles, Nat.compare, id)) return marketErr(#Waiting({ cycle = id; state = MkT.cycleStateText(c.state); reason = "a drive is in progress" }));
+    Map.add(drivingCycles, Nat.compare, id, ());
+    let result = try { await* driveCycleStep(c, m) } catch (e) { ignore Map.delete(drivingCycles, Nat.compare, id); throw e };
+    ignore Map.delete(drivingCycles, Nat.compare, id);
+    result
+  };
+  func driveCycleStep(c0 : MarketCore.CycleRow, m : MarketCore.MarketRow) : async* Result.Result<MkT.CycleView, T.Error> {
+    let engine : Engine_ = actor (Principal.toText(m.engine));
+    let today = JCore.effectiveToday(journal, now());
+    let ?venue = SettlementCore.venue(desk.settlement) else return #err(#SettlementError({ error = #NoVenue }));
+    let core : Core_ = actor (Principal.toText(venue.core));
+    func fresh() : ?MarketCore.CycleRow { switch (MarketCore.cycle(desk.market, c0.id)) { case (?c) { if (c.lastBlock == c0.lastBlock) ?c else null }; case null null } };
+    func moved() : Result.Result<MkT.CycleView, T.Error> { marketErr(#Waiting({ cycle = c0.id; state = MkT.cycleStateText(c0.state); reason = "the cycle moved during the call" })) };
+    switch (MarketCore.nextStep(desk.market, c0, m)) {
+      case (#nothing(x)) marketErr(#CycleNotIn({ cycle = c0.id; state = MkT.cycleStateText(c0.state); wanted = x.reason }));
+      case (#submit(x)) {
+        // the desk's leg is approved to the core for what the engine already holds reserved plus this order
+        let reserved = try { await engine.reservationOf(me()) } catch (_e) { return cycleRefused(c0, "reservationOf", "the engine did not answer", today) };
+        let (ledger, amount) = switch (x.order.side) { case (#sell) (m.sharesLedger, reserved.shares + x.order.units); case (#buy) (m.cashLedger, reserved.cash + x.limit * x.order.units) };
+        switch (await* approveCore(ledger, venue.core, amount)) { case (#err(reason)) return cycleRefused(c0, "approve", reason, today); case (#ok(())) {} };
+        let window = try { await engine.getCurrentWindow() } catch (_e) { return cycleRefused(c0, "getCurrentWindow", "the engine did not answer", today) };
+        let r = try { await engine.submitOrder({ side = x.order.side; limitPrice = x.limit; qty = x.order.units; allOrNone = false }) } catch (_e) { return cycleRefused(c0, "submitOrder", "the engine did not answer", today) };
+        let ?_ = fresh() else return moved();
+        switch (r) {
+          case (#ok(res)) ignore commitDesk(me(), #market(#orderSubmitted({ cycle = c0.id; order = x.order.id; engineOrder = res.orderId; window; limit = x.limit; day = today })), null);
+          case (#err(reason)) ignore commitDesk(me(), #market(#orderRefused({ cycle = c0.id; order = x.order.id; reason; day = today })), null);
+        };
+        #ok(cycleNow(c0.id))
+      };
+      case (#clear(x)) {
+        let r = switch (x.window) {
+          case null { try { await engine.clearWindow() } catch (_e) { return cycleRefused(c0, "clearWindow", "the engine did not answer", today) } };
+          case (?w) {
+            // the engine resumes its own chunks by timer; a clear it has finished is read as complete
+            let pending = try { await engine.pendingClearStatus(w) } catch (_e) { return cycleRefused(c0, "pendingClearStatus", "the engine did not answer", today) };
+            switch (pending) {
+              case null #ok({ window = w; clearingPrice = if (c0.hasPrice) ?c0.clearingPrice else null; targetVolume = c0.volume; fillsThisCall = 0; totalFilled = c0.volume; complete = true; chunks = c0.chunks; note = "clear complete" } : EngineClear);
+              case (?_) { try { await engine.continueClear(w) } catch (_e) { return cycleRefused(c0, "continueClear", "the engine did not answer", today) } };
+            }
+          };
+        };
+        let ?_ = fresh() else return moved();
+        switch (r) {
+          case (#ok(res)) ignore commitDesk(me(), #market(#clearAdvanced({ cycle = c0.id; window = res.window; clearingPrice = res.clearingPrice; targetVolume = res.targetVolume; filled = res.totalFilled; chunks = res.chunks; complete = res.complete; day = today })), null);
+          case (#err(reason)) return cycleRefused(c0, "clear", reason, today);
+        };
+        #ok(cycleNow(c0.id))
+      };
+      case (#readFills(x)) {
+        let all = try { await engine.allObligations() } catch (_e) { return cycleRefused(c0, "allObligations", "the engine did not answer", today) };
+        let ?c = fresh() else return moved();
+        let (taken, through, complete) = readPage(all, x.from);
+        recordFills(c, m, taken, through, complete, today);
+        #ok(cycleNow(c.id))
+      };
+      case (#withdraw(x)) {
+        // an order still resting on the engine after the clear is withdrawn, so no later window fills it
+        let r = try { await engine.cancelOrder(x.order.engineOrder) } catch (_e) { return cycleRefused(c0, "cancelOrder", "the engine did not answer", today) };
+        let ?c = fresh() else return moved();
+        switch (r) {
+          case (#ok(_)) ignore commitDesk(me(), #market(#orderWithdrawn({ cycle = c.id; order = x.order.id; engineOrder = x.order.engineOrder; day = today })), null);
+          case (#err(reason)) return cycleRefused(c, "cancelOrder", reason, today);
+        };
+        #ok(cycleNow(c.id))
+      };
+      case (#close) {
+        // a last look at the engine: a fill that landed since the read (another party's clear) is recorded and the close waits
+        let all = try { await engine.allObligations() } catch (_e) { return cycleRefused(c0, "allObligations", "the engine did not answer", today) };
+        let ?c = fresh() else return moved();
+        let (taken, through, complete) = readPage(all, c.nextSeq);
+        var late = 0;
+        for (o in taken.vals()) { switch (Core.fillEventOf(desk, c, me(), o, today)) { case (?_) late += 1; case null {} } };
+        if (late > 0) { recordFills(c, m, taken, through, complete, today); return #ok(cycleNow(c.id)) };
+        switch (Core.planCycleClose(desk, c, today)) { case (#err(e)) #err(e); case (#ok(ev)) { ignore commitDesk(me(), ev, null); #ok(cycleNow(c.id)) } }
+      };
+
+      case (#captureFill(x)) {
+        let approver = Core.cycleApproverOf(deskBlocks(), c0.id);
+        switch (Core.planFillCapture(desk, deskBlocks(), c0, m, x.fill, approver, today)) {
+          case (#err(e)) { ignore commitDesk(me(), #market(#callRefused({ cycle = c0.id; step = "capture " # Nat.toText(x.fill.seq); reason = debug_show e; day = today })), null); return #err(e) };
+          case (#ok(evs)) commitAll(evs);
+        };
+        let ?f2 = MarketCore.fill(desk.market, c0.id, x.fill.seq) else return marketErr(#UnknownFill({ cycle = c0.id; seq = x.fill.seq }));
+        switch (Core.planFillInstruction(desk, deskBlocks(), c0, m, f2, today)) {
+          case (#err(e)) { ignore commitDesk(me(), #market(#callRefused({ cycle = c0.id; step = "instruct " # Nat.toText(x.fill.seq); reason = debug_show e; day = today })), null); return #err(e) };
+          case (#ok(evs)) commitAll(evs);
+        };
+        #ok(cycleNow(c0.id))
+      };
+      case (#instructFill(x)) {
+        switch (Core.planFillInstruction(desk, deskBlocks(), c0, m, x.fill, today)) {
+          case (#err(e)) { ignore commitDesk(me(), #market(#callRefused({ cycle = c0.id; step = "instruct " # Nat.toText(x.fill.seq); reason = debug_show e; day = today })), null); return #err(e) };
+          case (#ok(evs)) commitAll(evs);
+        };
+        #ok(cycleNow(c0.id))
+      };
+      case (#settleFill(x)) {
+        // the engine's trade for the obligation: settled by the engine's relayer already, or driven now
+        var tid = try { await core.tradeIdForMatch(m.engine, x.fill.seq) } catch (_e) { return cycleRefused(c0, "tradeIdForMatch", "Tachyon did not answer", today) };
+        if (tid == null) {
+          let r = try { await engine.settleObligation(x.fill.seq, m.deadlineSecs) } catch (_e) { return cycleRefused(c0, "settleObligation", "the engine did not answer", today) };
+          switch (r) { case (#err(reason)) { let ?_ = fresh() else return moved(); return cycleRefused(c0, "settleObligation", reason, today) }; case (#ok(_)) {} };
+          tid := try { await core.tradeIdForMatch(m.engine, x.fill.seq) } catch (_e) { return cycleRefused(c0, "tradeIdForMatch", "Tachyon did not answer", today) };
+        };
+        let ?c = fresh() else return moved();
+        let ?f = MarketCore.fill(desk.market, c.id, x.fill.seq) else return marketErr(#UnknownFill({ cycle = c.id; seq = x.fill.seq }));
+        switch (tid) {
+          case null cycleRefused(c, "tradeIdForMatch", "the engine settled nothing for obligation " # Nat.toText(f.seq), today);
+          case (?t) { switch (Core.planFillTrade(desk, c, f, t, today)) { case (#err(e)) #err(e); case (#ok(evs)) { commitAll(evs); #ok(cycleNow(c.id)) } } };
+        }
+      };
+    }
+  };
+
+  // ─── the feed and the market reads ───
+  public query func feedOf(isin : Text) : async ?FeT.FeedView { switch (FeedCore.feed(desk.feed, isin)) { case (?f) ?FeedCore.view(f); case null null } };
+  public query func feeds() : async [FeT.FeedView] { Array.map<FeedCore.FeedRow, FeT.FeedView>(FeedCore.feeds(desk.feed), FeedCore.view) };
+  public query func feedSources(isin : Text) : async [FeT.SourceView] { Array.map<FeedCore.SourceRow, FeT.SourceView>(FeedCore.sourcesOf(desk.feed, isin), FeedCore.sourceView) };
+  public query func feedStatus() : async FeT.Status { FeedCore.status(desk.feed) };
+  /// The price a cycle would clear against now: accepted, fresh and not halted, or why not.
+  public query func referencePrice(isin : Text) : async Result.Result<{ priceMicro : Nat; asOf : Nat64; block : Nat }, T.Error> {
+    switch (FeedCore.referencePrice(desk.feed, isin, now())) { case (#err(e)) #err(#FeedError({ error = e })); case (#ok(r)) #ok(r) }
+  };
+  public query func marketOf(isin : Text) : async ?{ isin : Text; engine : Principal; sharesLedger : Principal; cashLedger : Principal; currency : Text; unitNominal : Nat; deadlineSecs : Nat; participants : Nat; lastBlock : Nat } {
+    MarketCore.market(desk.market, isin)
+  };
+  public query func marketParticipants(isin : Text) : async [MkT.Participant] { Array.map<MarketCore.ParticipantRow, MkT.Participant>(MarketCore.participantsOf(desk.market, isin), func(p) { { principal = p.principal; counterparty = p.counterparty } }) };
+  public shared query ({ caller }) func marketOrder(id : Nat) : async Result.Result<?MkT.OrderView, T.Error> {
+    switch (requireReader(caller)) { case (?e) return #err(e); case null {} };
+    switch (MarketCore.order(desk.market, id)) {
+      case (?o) { if (not Auth.mayReadBook(readScope(caller), o.book)) return #err(#OutsideBookScope({ book = o.book })); #ok(?Core.orderView(desk, deskBlocks(), o)) };
+      case null #ok(null);
+    }
+  };
+  public shared query ({ caller }) func marketOrders(isin : Text) : async [MkT.OrderView] {
+    let scope = readScope(caller);
+    Array.map<MarketCore.OrderRow, MkT.OrderView>(Array.filter<MarketCore.OrderRow>(MarketCore.ordersOf(desk.market, isin), func(o) { Auth.mayReadBook(scope, o.book) }), func(o) { Core.orderView(desk, deskBlocks(), o) })
+  };
+  public query func marketCycle(id : Nat) : async ?MkT.CycleView { switch (MarketCore.cycle(desk.market, id)) { case (?c) ?MarketCore.cycleView(c); case null null } };
+  public query func marketCycles(isin : Text) : async [MkT.CycleView] { Array.map<MarketCore.CycleRow, MkT.CycleView>(MarketCore.cyclesOf(desk.market, isin), MarketCore.cycleView) };
+  public query func cycleFills(cycle : Nat) : async [MkT.FillView] { Array.map<MarketCore.FillRow, MkT.FillView>(MarketCore.fillsOf(desk.market, cycle), MarketCore.fillView) };
+  public query func marketStatus() : async MkT.Status { MarketCore.status(desk.market) };
+  /// A fill's securities trade confirmation (setr.027.001.05): the desk's side and the participant's, the face,
+  /// the gross amount, the clean price and the accrued at the settlement day.
+  public query func tradeConfirmation(cycle : Nat, seq : Nat) : async ?Text {
+    let ?f = MarketCore.fill(desk.market, cycle, seq) else return null;
+    let ?c = MarketCore.cycle(desk.market, cycle) else return null;
+    let ?m = MarketCore.market(desk.market, c.isin) else return null;
+    let ?(terms, _) = Core.orderTermsOf(deskBlocks(), f.order) else return null;
+    let ?sec = TreasuryCore.security(desk.treasury, c.isin) else return null;
+    let nominal = f.units * m.unitNominal;
+    let cash = f.price * f.units;
+    let accrued = TreasuryMath.accruedCoupon(nominal, sec.couponBps, TreasuryCore.conventionOf(sec), TreasuryCore.couponPeriodsOf(sec, nominal), c.day);
+    let ?(priceMicro, _) = MarketCore.impliedPrice(cash, accrued, nominal) else return null;
+    let participant = switch (MarketCore.participant(desk.market, c.isin, f.counterparty)) { case (?p) p.counterparty; case null ({ party = null; name = Principal.toText(f.counterparty); bic = ""; lei = "" } : TT.Counterparty) };
+    let self : TT.Counterparty = switch (desk.authority.identity) { case (?i) ({ party = null; name = i.name; bic = i.bic; lei = i.lei } : TT.Counterparty); case null ({ party = null; name = terms.book; bic = ""; lei = "" } : TT.Counterparty) };
+    ?MarketMessages.setr027Xml(cycle, seq, f.order, terms.side, c.isin, sec.currency, minorUnits(sec.currency), nominal, cash, priceMicro, accrued, c.day, c.day, self, participant)
+  };
+  // ─── liquidity ───
+  /// The cash-flow ladder, the two ratios, the large exposures and the return are read out of the rows on the
+  /// day asked; a row whose counterparty or instrument has no declared class refuses the read and names itself.
+  public query func liquidityLadder(day : Nat) : async Result.Result<LQ.LadderView, T.Error> { Core.liquidityLadder(desk, deskBlocks(), journal, day) };
+  public query func liquidityCoverage(day : Nat) : async Result.Result<LQ.LcrView, T.Error> { Core.liquidityCoverage(desk, deskBlocks(), journal, day) };
+  public query func netStableFunding(day : Nat) : async Result.Result<LQ.NsfrView, T.Error> { Core.netStableFunding(desk, deskBlocks(), journal, day) };
+  public query func largeExposures(day : Nat) : async Result.Result<LQ.LargeExposuresView, T.Error> { Core.largeExposures(desk, deskBlocks(), journal, day) };
+  /// The treasury liquidity return of a day: the document, its hash, at the log's height; the same state and
+  /// day give the same bytes.
+  public query func liquidityReturn(day : Nat) : async Result.Result<{ height : Nat; day : Nat; xml : Text; hash : Blob }, T.Error> { Core.liquidityReturn(desk, deskBlocks(), journal, day) };
+  public query func liquidityStatus() : async LQ.Status { LiquidityCore.status(desk.liquidity) };
+  public query func liquidityFactors() : async ?LQ.Factors { LiquidityCore.factors(desk.liquidity) };
+  public query func instrumentLevels() : async [(Text, LQ.HqlaLevel)] { LiquidityCore.instruments(desk.liquidity) };
+  public query func counterpartyTypes() : async [(Text, LQ.CounterpartyType)] { LiquidityCore.counterparties(desk.liquidity) };
 
   // ─── limits ───
   public query func limitNode(id : Text) : async ?LT.NodeView { switch (LimitCore.node(desk.limits, id)) { case (?n) ?LimitCore.view(n); case null null } };

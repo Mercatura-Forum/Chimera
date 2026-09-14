@@ -39,6 +39,7 @@ module {
       case (#boughtIn) st("SttlmSts/Flng", "BYIY", "bought in");
       case (#cancelled) st("PrcgSts/Canc", "CANI", "cancelled by consent");
       case (#settled) st("PrcgSts/AckdAccptd", "NORE", "settled");
+      case (#matched) st("PrcgSts/AckdAccptd", "NORE", "matched; the engine's trade awaits the desk's observation");
     }
   };
 

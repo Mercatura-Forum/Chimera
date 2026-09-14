@@ -8,11 +8,22 @@ import Freeze "mo:kernel/domain/Freeze";
 module {
   public func vectors() : [Freeze.Vector] {
     [
+      { family = "declareFeed"; version = 1; hex = "317e18520b2ac3e0e00df8c93085789921755cb296d51ae590b449eb75ccb3ee" },
+      { family = "submitPrice"; version = 1; hex = "c4d4095fa0df4868f32d62893dd508edef3aa944bf1cf70414f11792544b2d91" },
+      { family = "liftHalt"; version = 1; hex = "461ae1a0114f8b7c5458d61eb5d0af7b8e6d5640df22feada5a690ffc66c7b0f" },
+      { family = "declareMarket"; version = 1; hex = "4a577d1a74fe0d3971e25971c27185cff363287d8066c0315a03a6d9b24b83a2" },
+      { family = "stageOrder"; version = 1; hex = "c03e168af7e56f1751d8db1117f54b098da9b79285ded4554414d8126357b3ce" },
+      { family = "cancelOrder"; version = 1; hex = "548057c37f80e43070f447f54a586c0760ea585b1ae354f51eea277c4cbe1f3c" },
+      { family = "openMarketCycle"; version = 1; hex = "d4e7827eb1bd910c1f5448cce08104e2cb71bc25fa56d9e7663bb9a9614bc749" },
       { family = "setReconciliationPolicy"; version = 1; hex = "ca7825795b1d03b2ef55b42305f23bd4f605218f10d2430e994e81a970bab7ff" },
       { family = "recordNostroNotification"; version = 1; hex = "fb2332948567ff82255bfff99e14710e116d9f68f5184d997427e480f75e8cec" },
       { family = "recordDepotStatement"; version = 1; hex = "0335b12d0021c78ebc737ec7e2937cbc5a2b7cc6a324f8b294ff28b253d90ede" },
       { family = "resolveDepotBreak"; version = 1; hex = "feaecc81c34993f59048887748424334a0fb72fbbbaeb181700b8c95cf69bacf" },
       { family = "resolveCashBreak"; version = 1; hex = "ebe680c6c6ce5ff5c469086cb92197e6cf08fff249b1c2efd30826dcee05ca28" },
+      { family = "setLiquidityFactors"; version = 1; hex = "52032d3b5d71f543a428a8e4f59a8111ec36899dc844009a5cfcc0cc65f8123d" },
+      { family = "classifyInstrument"; version = 1; hex = "f85296283a40a8934481c07ef0e4f72e6a945f16e6b23800fca488032ec33993" },
+      { family = "classifyCounterparty"; version = 1; hex = "ae0809d5ff61bf84e769141184109b321dc447e32c5218c789552daaf4fab6f8" },
+      { family = "declareCapital"; version = 1; hex = "55f26dd2ead55f403cbff32104b3ead0a516c0d53cf0543e53843d3367052e46" },
       { family = "setCollateralPolicy"; version = 1; hex = "e0ccc2a895e5d1773a648109bd48ca3086849059bbd842450fbad15859f0fc79" },
       { family = "setCollateralAgreement"; version = 1; hex = "1105280b198dad83e912c1c7443ad946ed7bb3f7ed940c7dcdac93d4dc9ca638" },
       { family = "postCollateralCash"; version = 1; hex = "ca168416d8bd9c0b3662193eb5808f5fb2eb6acdb8cb80bb387fd1ccc31b6613" },

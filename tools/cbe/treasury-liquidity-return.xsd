@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The treasury liquidity return the desk renders: the cash-flow ladder per currency and bucket, the liquidity
+  coverage ratio and its stock, the net stable funding ratio, the large exposures against the eligible capital.
+  Every amount is in minor units of the currency named; every ratio and share is in basis points.
+  Attribution: Thebes Core Team. Licence: Apache 2.0.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns="urn:thebes:cbe:treasury-liquidity:1" targetNamespace="urn:thebes:cbe:treasury-liquidity:1" elementFormDefault="qualified">
+  <xs:simpleType name="Bps"><xs:restriction base="xs:nonNegativeInteger"><xs:maxInclusive value="1000000"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="Currency"><xs:restriction base="xs:string"><xs:pattern value="[A-Z]{3}"/></xs:restriction></xs:simpleType>
+  <xs:simpleType name="Bucket"><xs:restriction base="xs:string"><xs:enumeration value="overnight"/><xs:enumeration value="2-7"/><xs:enumeration value="8-30"/><xs:enumeration value="31-90"/><xs:enumeration value="91-180"/><xs:enumeration value="181-365"/><xs:enumeration value="over-365"/></xs:restriction></xs:simpleType>
+  <xs:element name="Return">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Ladder">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="Bucket" minOccurs="0" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:attribute name="currency" type="Currency" use="required"/>
+                  <xs:attribute name="name" type="Bucket" use="required"/>
+                  <xs:attribute name="inflows" type="xs:nonNegativeInteger" use="required"/>
+                  <xs:attribute name="outflows" type="xs:nonNegativeInteger" use="required"/>
+                  <xs:attribute name="net" type="xs:integer" use="required"/>
+                  <xs:attribute name="flows" type="xs:nonNegativeInteger" use="required"/>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+            <xs:attribute name="positions" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="flows" type="xs:nonNegativeInteger" use="required"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="LCR">
+          <xs:complexType>
+            <xs:attribute name="level1" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="level2A" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="level2B" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="capAdjustment" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="hqla" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="outflows" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="inflows" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="inflowsCounted" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="netOutflows" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="ratioBps" type="Bps" use="required"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="NSFR">
+          <xs:complexType>
+            <xs:attribute name="capital" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="asf" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="rsf" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="ratioBps" type="Bps" use="required"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="LargeExposures">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="Exposure" minOccurs="0" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:attribute name="counterparty" type="xs:string" use="required"/>
+                  <xs:attribute name="group" type="xs:string" use="required"/>
+                  <xs:attribute name="exposure" type="xs:nonNegativeInteger" use="required"/>
+                  <xs:attribute name="shareBps" type="xs:nonNegativeInteger" use="required"/>
+                  <xs:attribute name="breach" type="xs:boolean" use="required"/>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+            <xs:attribute name="capital" type="xs:nonNegativeInteger" use="required"/>
+            <xs:attribute name="boundBps" type="Bps" use="required"/>
+            <xs:attribute name="breaches" type="xs:nonNegativeInteger" use="required"/>
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+      <xs:attribute name="day" type="xs:nonNegativeInteger" use="required"/>
+      <xs:attribute name="height" type="xs:nonNegativeInteger" use="required"/>
+      <xs:attribute name="currency" type="Currency" use="required"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

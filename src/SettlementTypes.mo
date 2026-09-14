@@ -38,9 +38,9 @@ module {
   /// The states an instruction passes through. The desk's own leg is escrowed in `#funded`; `#settled` is reached
   /// only from a verified receipt; `#failed` waits for the next cycle or a decision; `#boughtIn` and `#cancelled`
   /// are terminal decisions.
-  public type InstructionState = { #instructed; #opened; #verified; #funded; #settled; #failed; #boughtIn; #cancelled };
+  public type InstructionState = { #instructed; #opened; #verified; #funded; #settled; #failed; #boughtIn; #cancelled; #matched };
   public func stateText(s : InstructionState) : Text {
-    switch (s) { case (#instructed) "instructed"; case (#opened) "opened"; case (#verified) "verified"; case (#funded) "funded"; case (#settled) "settled"; case (#failed) "failed"; case (#boughtIn) "boughtIn"; case (#cancelled) "cancelled" }
+    switch (s) { case (#instructed) "instructed"; case (#opened) "opened"; case (#verified) "verified"; case (#funded) "funded"; case (#settled) "settled"; case (#failed) "failed"; case (#boughtIn) "boughtIn"; case (#cancelled) "cancelled"; case (#matched) "matched" }
   };
 
   public type Instruction = {
@@ -48,6 +48,9 @@ module {
     assetLedger : Principal; assetAmount : Nat; cashLedger : Principal; cashAmount : Nat;
     /// The Tachyon trade the counterparty opened, for a purchase; a sale's trade id is the desk's own opening.
     tradeId : ?Nat; reference : Text; documentHash : Blob;
+    /// A fill of a market cycle: the trade is the engine's, settled by its relayer; the desk observes it and
+    /// verifies the receipt, and opens or funds nothing unless that trade aborted.
+    matched : Bool;
   };
 
   public type Event = {

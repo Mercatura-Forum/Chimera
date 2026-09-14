@@ -20,6 +20,10 @@ import VT "../../src/ValuationTypes";
 import CoT "../../src/CollateralTypes";
 import LT "../../src/LimitTypes";
 import RT "../../src/ReconciliationTypes";
+import LQ "../../src/LiquidityTypes";
+import FeT "../../src/FeedTypes";
+import MkT "../../src/MarketTypes";
+import FV "FeedVectors";
 
 import T "../../src/DeskTypes";
 import Can "../../src/DeskCanonical";
@@ -49,7 +53,7 @@ module {
   public let announcement : CuT.Announcement = { isin = "EG0000012345"; kind = #coupon({ perHundredMicro = 6_000_000 }); recordDate = 20700; exDate = 20699; paymentDate = 20702; source = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob };
 
   public func venue() : ST.Venue { { core = bob(); deadlineSecs = 3600; recycleLimit = 3; claimsAccount = "1540" } };
-  public func instruction() : ST.Instruction { { family = #treasury; deal = 40; leg = 0; cycle = 20672; role = #taker; counterparty = alice(); assetLedger = bob(); assetAmount = 10_000_000_00; cashLedger = alice(); cashAmount = 9_850_000_00; tradeId = ?7; reference = "security-1"; documentHash = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob } };
+  public func instruction() : ST.Instruction { { family = #treasury; deal = 40; leg = 0; cycle = 20672; role = #taker; counterparty = alice(); assetLedger = bob(); assetAmount = 10_000_000_00; cashLedger = alice(); cashAmount = 9_850_000_00; tradeId = ?7; reference = "security-1"; documentHash = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob; matched = false } };
 
   public let financingPolicy : FT.Policy = { repoPayable = "2600"; reverseRepoReceivable = "1600"; repoInterestPayable = "2610"; repoInterestReceivable = "1610"; repoInterestExpense = "5600"; repoInterestIncome = "4600"; marginCashGiven = "1620"; marginCashReceived = "2620"; lendingFeeReceivable = "1630"; lendingFeeIncome = "4630"; cashCollateralPayable = "2630"; rebateExpense = "5630"; manufacturedPaymentReceivable = "1640"; marginGraceDays = 2 };
   public let repoTerms : FT.RepoTerms = { reverse = false; currency = "EGP"; cash = 9_500_000_00; rateBps = 1900; dayCount = #a004_Act365Fixed; start = 20670; maturity = ?20700; collateral = { isin = "EG0000012345"; nominal = 10_000_000_00 }; haircutBps = 500; thresholdBps = 200; cashAccount = cash; depot = "DEPOT-CITI" };
@@ -67,13 +71,46 @@ module {
   public let reconciliationPolicy : RT.Policy = { cashAccounts = [{ currency = "EGP"; cash = cash }, { currency = "USD"; cash = nostro }]; breakAgeAlertDays = 3 };
   public let entry : TT.StatementEntry = { reference = "security-1"; amount = 9_850_000_00; credit = false; valueDay = 20672; bookingDay = 20672; counterparty = "CITI" };
 
+  /// The supervisory factors of BCBS 238 and 295 for the desk's counterparty types, and the BCBS 283 bound.
+  public let liquidityFactors : LQ.Factors = {
+    hqlaHaircuts = [{ level = #level1; bps = 0 }, { level = #level2A; bps = 1_500 }, { level = #level2B; bps = 5_000 }, { level = #none; bps = 10_000 }];
+    level2CapBps = 4_000; level2BCapBps = 1_500;
+    runoff = [{ counterpartyType = #retailStable; bps = 500 }, { counterpartyType = #retailLessStable; bps = 1_000 }, { counterpartyType = #smallBusiness; bps = 1_000 }, { counterpartyType = #nonFinancialCorporate; bps = 4_000 }, { counterpartyType = #sovereign; bps = 4_000 }, { counterpartyType = #centralBank; bps = 4_000 }, { counterpartyType = #financial; bps = 10_000 }, { counterpartyType = #operational; bps = 2_500 }];
+    inflow = [{ counterpartyType = #retailStable; bps = 5_000 }, { counterpartyType = #retailLessStable; bps = 5_000 }, { counterpartyType = #smallBusiness; bps = 5_000 }, { counterpartyType = #nonFinancialCorporate; bps = 5_000 }, { counterpartyType = #sovereign; bps = 10_000 }, { counterpartyType = #centralBank; bps = 10_000 }, { counterpartyType = #financial; bps = 10_000 }, { counterpartyType = #operational; bps = 0 }];
+    inflowCapBps = 7_500;
+    asfUnderSixMonths = [{ counterpartyType = #retailStable; bps = 9_500 }, { counterpartyType = #retailLessStable; bps = 9_000 }, { counterpartyType = #smallBusiness; bps = 9_000 }, { counterpartyType = #nonFinancialCorporate; bps = 5_000 }, { counterpartyType = #sovereign; bps = 5_000 }, { counterpartyType = #centralBank; bps = 0 }, { counterpartyType = #financial; bps = 0 }, { counterpartyType = #operational; bps = 5_000 }];
+    asfSixToTwelve = [{ counterpartyType = #retailStable; bps = 9_500 }, { counterpartyType = #retailLessStable; bps = 9_000 }, { counterpartyType = #smallBusiness; bps = 9_000 }, { counterpartyType = #nonFinancialCorporate; bps = 5_000 }, { counterpartyType = #sovereign; bps = 5_000 }, { counterpartyType = #centralBank; bps = 5_000 }, { counterpartyType = #financial; bps = 5_000 }, { counterpartyType = #operational; bps = 5_000 }];
+    asfOverYearBps = 10_000;
+    rsfHqla = [{ level = #level1; bps = 500 }, { level = #level2A; bps = 1_500 }, { level = #level2B; bps = 5_000 }, { level = #none; bps = 10_000 }];
+    rsfUnderSixMonths = [{ counterpartyType = #retailStable; bps = 5_000 }, { counterpartyType = #retailLessStable; bps = 5_000 }, { counterpartyType = #smallBusiness; bps = 5_000 }, { counterpartyType = #nonFinancialCorporate; bps = 5_000 }, { counterpartyType = #sovereign; bps = 5_000 }, { counterpartyType = #centralBank; bps = 0 }, { counterpartyType = #financial; bps = 1_000 }, { counterpartyType = #operational; bps = 5_000 }];
+    rsfSixToTwelve = [{ counterpartyType = #retailStable; bps = 5_000 }, { counterpartyType = #retailLessStable; bps = 5_000 }, { counterpartyType = #smallBusiness; bps = 5_000 }, { counterpartyType = #nonFinancialCorporate; bps = 5_000 }, { counterpartyType = #sovereign; bps = 5_000 }, { counterpartyType = #centralBank; bps = 5_000 }, { counterpartyType = #financial; bps = 5_000 }, { counterpartyType = #operational; bps = 5_000 }];
+    rsfOverYear = [{ counterpartyType = #retailStable; bps = 8_500 }, { counterpartyType = #retailLessStable; bps = 8_500 }, { counterpartyType = #smallBusiness; bps = 8_500 }, { counterpartyType = #nonFinancialCorporate; bps = 8_500 }, { counterpartyType = #sovereign; bps = 6_500 }, { counterpartyType = #centralBank; bps = 6_500 }, { counterpartyType = #financial; bps = 8_500 }, { counterpartyType = #operational; bps = 8_500 }];
+    rsfDerivativesBps = 10_000;
+    largeExposureBps = 2_500; largeExposureReportBps = 1_000;
+  };
+
+  public func feed() : FeT.Feed { { isin = "EG0000012345"; sources = [{ id = "BLOOMBERG"; publicKey = FV.publicKey }, { id = "REUTERS"; publicKey = FV.publicKey }, { id = "CBE"; publicKey = FV.publicKey }]; bandBps = 100; staleSeconds = 600 } };
+  public func submission() : FeT.Submission { { isin = FV.isin; source = FV.source; priceMicro = FV.priceMicro; asOf = FV.asOf; signature = FV.signature } };
+  public func market() : MkT.Market { { isin = "EG0000012345"; engine = bob(); sharesLedger = alice(); cashLedger = bob(); currency = "EGP"; unitNominal = 10_000; deadlineSecs = 86_400; participants = [{ principal = alice(); counterparty = citi }] } };
+  public func orderTerms() : MkT.OrderTerms { { book = "BR01"; isin = "EG0000012345"; side = #buy; units = 500; classification = #fvoci; cash = cash; reference = "order-1" } };
   public func samples() : [Freeze.Sample<T.Command>] {
     [
+      { family = "declareFeed"; command = #declareFeed({ feed = feed() }) },
+      { family = "submitPrice"; command = #submitPrice({ submission = submission() }) },
+      { family = "liftHalt"; command = #liftHalt({ isin = "EG0000012345" }) },
+      { family = "declareMarket"; command = #declareMarket({ market = market() }) },
+      { family = "stageOrder"; command = #stageOrder({ terms = orderTerms(); approver = null }) },
+      { family = "cancelOrder"; command = #cancelOrder({ order = 210; reason = "withdrawn by the trader" }) },
+      { family = "openMarketCycle"; command = #openMarketCycle({ isin = "EG0000012345"; approver = ?alice() }) },
       { family = "setReconciliationPolicy"; command = #setReconciliationPolicy(reconciliationPolicy) },
       { family = "recordNostroNotification"; command = #recordNostroNotification({ nostro = "NOSTRO-USD-CITI"; document = h(5) }) },
       { family = "recordDepotStatement"; command = #recordDepotStatement({ depot = "DEPOT-CITI"; document = h(6) }) },
       { family = "resolveDepotBreak"; command = #resolveDepotBreak({ break_ = 140; resolution = "the custodian corrected its report"; correction = ?150 }) },
       { family = "resolveCashBreak"; command = #resolveCashBreak({ break_ = 141; resolution = "a fee the ledger took"; correction = null }) },
+      { family = "setLiquidityFactors"; command = #setLiquidityFactors(liquidityFactors) },
+      { family = "classifyInstrument"; command = #classifyInstrument({ isin = "EG0000012345"; level = #level1 }) },
+      { family = "classifyCounterparty"; command = #classifyCounterparty({ name = "CITI"; counterpartyType = #financial }) },
+      { family = "declareCapital"; command = #declareCapital({ currency = "EGP"; amount = 200_000_000_00 }) },
       { family = "setCollateralPolicy"; command = #setCollateralPolicy(collateralPolicy) },
       { family = "setCollateralAgreement"; command = #setCollateralAgreement({ agreement }) },
       { family = "postCollateralCash"; command = #postCollateralCash({ agreement = "CSA-CITI"; move = #received; amount = 1_200_000_00; currency = "EGP"; postingDate = 20671; valueDate = 20671; period = "2026-08"; narration = "collateral cash" }) },
@@ -326,6 +363,33 @@ module {
       #reconciliation(#cashBreakAged({ break_ = 141; ageDays = 3; day = 20675 })),
       #reconciliation(#cashBreakCleared({ break_ = 141; day = 20676 })),
       #reconciliation(#cashBreakResolved({ break_ = 141; resolution = "a fee the ledger took"; correction = null; day = 20676 })),
+      #liquidity(#factorsSet({ factors = liquidityFactors; day = 20672 })),
+      #liquidity(#instrumentClassified({ isin = "EG0000012345"; level = #level2A; day = 20672 })),
+      #liquidity(#counterpartyClassified({ name = "CITI"; counterpartyType = #financial; day = 20672 })),
+      #liquidity(#capitalDeclared({ currency = "EGP"; amount = 200_000_000_00; day = 20672 })),
+      #feed(#feedDeclared({ feed = feed(); day = 20672 })),
+      #feed(#priceSubmitted({ isin = FV.isin; source = FV.source; priceMicro = FV.priceMicro; asOf = FV.asOf; signature = FV.signature; day = 20672 })),
+      #feed(#priceAccepted({ isin = FV.isin; priceMicro = FV.priceMicro; asOf = FV.asOf; figures = [{ source = "BLOOMBERG"; priceMicro = FV.priceMicro; asOf = FV.asOf }, { source = "REUTERS"; priceMicro = FV.priceMicro + 1_000; asOf = FV.asOf }, { source = "CBE"; priceMicro = FV.priceMicro - 2_000; asOf = FV.asOf }]; day = 20672 })),
+      #feed(#instrumentHalted({ isin = FV.isin; reason = #disagreement; figures = [{ source = "BLOOMBERG"; priceMicro = FV.priceMicro; asOf = FV.asOf }]; day = 20672 })),
+      #feed(#instrumentHalted({ isin = FV.isin; reason = #stale; figures = []; day = 20673 })),
+      #feed(#haltLifted({ isin = FV.isin; day = 20674 })),
+      #market(#marketDeclared({ market = market(); day = 20672 })),
+      #market(#orderStaged({ terms = orderTerms(); trader = alice(); withinLimits = true; approver = null; day = 20672 })),
+      #market(#orderCancelled({ order = 210; reason = "withdrawn by the trader"; day = 20672 })),
+      #market(#cycleOpened({ isin = "EG0000012345"; referenceMicro = 98_450_000; referenceBlock = 205; orders = [210, 211]; day = 20672 })),
+      #market(#orderSubmitted({ cycle = 220; order = 210; engineOrder = 7; window = 3; limit = 9_845; day = 20672 })),
+      #market(#orderRefused({ cycle = 220; order = 211; reason = "insufficient free shares"; day = 20672 })),
+      #market(#clearAdvanced({ cycle = 220; window = 3; clearingPrice = ?9_845; targetVolume = 800; filled = 400; chunks = 1; complete = false; day = 20672 })),
+      #market(#clearAdvanced({ cycle = 220; window = 3; clearingPrice = null; targetVolume = 0; filled = 0; chunks = 1; complete = true; day = 20672 })),
+      #market(#filled({ cycle = 220; order = 210; seq = 0; price = 9_845; units = 500; counterparty = bob(); day = 20672 })),
+      #market(#fillUnattributed({ cycle = 220; seq = 1; counterparty = bob(); day = 20672 })),
+      #market(#fillCaptured({ cycle = 220; seq = 0; deal = 230; day = 20672 })),
+      #market(#fillInstructed({ cycle = 220; seq = 0; deal = 230; instruction = 233; day = 20672 })),
+      #market(#fillTradeSet({ cycle = 220; seq = 0; tradeId = 77; day = 20672 })),
+      #market(#fillsRead({ cycle = 220; through = 2; fills = 2; complete = true; day = 20672 })),
+      #market(#orderWithdrawn({ cycle = 220; order = 211; engineOrder = 8; day = 20672 })),
+      #market(#callRefused({ cycle = 220; step = "submitOrder"; reason = "the engine did not answer"; day = 20672 })),
+      #market(#cycleClosed({ cycle = 220; fills = 2; unfilled = [211]; day = 20672 })),
     ]
   };
 }

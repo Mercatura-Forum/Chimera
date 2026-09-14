@@ -31,6 +31,9 @@ import VT "ValuationTypes";
 import CoT "CollateralTypes";
 import LT "LimitTypes";
 import RT "ReconciliationTypes";
+import LQ "LiquidityTypes";
+import FeT "FeedTypes";
+import MkT "MarketTypes";
 
 module {
 
@@ -159,6 +162,20 @@ module {
     #recordDepotStatement : { depot : Text; document : Blob };
     #resolveDepotBreak : { break_ : RT.BreakId; resolution : Text; correction : ?Nat };
     #resolveCashBreak : { break_ : RT.BreakId; resolution : Text; correction : ?Nat };
+    // ── liquidity: the factors of the ratios, the classes of instruments and counterparties, the eligible capital ──
+    #setLiquidityFactors : LQ.Factors;
+    #classifyInstrument : { isin : Text; level : LQ.HqlaLevel };
+    #classifyCounterparty : { name : Text; counterpartyType : LQ.CounterpartyType };
+    #declareCapital : { currency : Text; amount : Nat };
+    // ── the price feed: sources declared, figures submitted under their signatures, a halt lifted ──
+    #declareFeed : { feed : FeT.Feed };
+    #submitPrice : { submission : FeT.Submission };
+    #liftHalt : { isin : Text };
+    // ── the market: the engine and its participants, orders staged and cancelled, a cycle opened ──
+    #declareMarket : { market : MkT.Market };
+    #stageOrder : { terms : MkT.OrderTerms; approver : ?Principal };
+    #cancelOrder : { order : MkT.OrderId; reason : Text };
+    #openMarketCycle : { isin : Text; approver : ?Principal };
     // ── treasury: the thirteen commands of Manticore's treasury domain, their bodies Manticore's ──
     #setTreasuryPolicy : TT.Policy;
     #registerSecurity : { terms : TT.SecurityTerms };
@@ -231,6 +248,9 @@ module {
     #collateral : CoT.Event;
     #limits : LT.Event;
     #reconciliation : RT.Event;
+    #liquidity : LQ.Event;
+    #feed : FeT.Event;
+    #market : MkT.Event;
   };
 
   public type BatchError = {
@@ -251,6 +271,8 @@ module {
     #AnonymousCaller;
     // the authority's refusals, the kernel's error union flattened so a reader sees the reason as the tag
     #NoGrant : { permission : PermissionId };
+    /// A read by a principal that holds no grant reading any book: refused before any row is looked up.
+    #NoReadableBook;
     #OutsideBookScope : { book : BookId };
     #OutsideCurrencyScope : { currency : Text };
     #OverCeiling : { currency : Text; amount : Nat; ceiling : Nat };
@@ -307,6 +329,9 @@ module {
     #CollateralError : { error : CoT.Error };
     #LimitError : { error : LT.Error };
     #ReconciliationError : { error : RT.Error };
+    #LiquidityError : { error : LQ.Error };
+    #FeedError : { error : FeT.Error };
+    #MarketError : { error : MkT.Error };
     #MissingRate : { currency : Text; asOf : Day };
   };
 
@@ -407,6 +432,9 @@ module {
       case (#collateral(_)) "collateral";
       case (#limits(_)) "limits";
       case (#reconciliation(_)) "reconciliation";
+      case (#liquidity(_)) "liquidity";
+      case (#feed(_)) "feed";
+      case (#market(_)) "market";
     }
   };
 }

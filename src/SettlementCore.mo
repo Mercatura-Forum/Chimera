@@ -31,7 +31,7 @@ import ST "SettlementTypes";
 
 module {
 
-  public let INSTRUCTION_ROW_BYTES : Nat = 181;
+  public let INSTRUCTION_ROW_BYTES : Nat = 182;
   public let CYCLE_ROW_BYTES : Nat = 74;
   public let LEDGER_ROW_BYTES : Nat = 31;
   let MAX_PAGE = 512;
@@ -39,7 +39,7 @@ module {
   public type InstructionRow = {
     id : ST.InstructionId; family : ST.Family; deal : Nat; leg : Nat; cycle : Nat; role : ST.Role; counterparty : Principal;
     assetLedger : Principal; assetAmount : Nat; cashLedger : Principal; cashAmount : Nat; tradeId : Nat;   // 0: none
-    state : ST.InstructionState; fails : Nat; escrowed : Bool; referenceHash : Nat; documentHash : Blob; lastBlock : Nat;
+    state : ST.InstructionState; fails : Nat; escrowed : Bool; referenceHash : Nat; documentHash : Blob; lastBlock : Nat; matched : Bool;
   };
   public type CycleRow = { businessDate : Nat; market : Text; priceSource : Text; state : ST.CycleState; settled : Nat; failed : Nat; pending : Nat; instructions : Nat; lastBlock : Nat };
 
@@ -47,8 +47,8 @@ module {
 
   func putPrincipal(b : R.Buf, p : Principal) { let bytes = Principal.toBlob(p); R.putNat(b, bytes.size(), 1); R.putText(b, "", 0); b.addBlob(bytes); var i = bytes.size(); while (i < 29) { R.putByte(b, 0); i += 1 } };
   func getPrincipal(a : [Nat8], off : Nat) : Principal { let n = R.getNat(a, off, 1); Principal.fromBlob(Blob.fromArray(Array.tabulate<Nat8>(n, func(i) { a[off + 1 + i] }))) };
-  func stateCode(s : ST.InstructionState) : Nat8 { switch (s) { case (#instructed) 1; case (#opened) 2; case (#verified) 3; case (#funded) 4; case (#settled) 5; case (#failed) 6; case (#boughtIn) 7; case (#cancelled) 8 } };
-  func stateOf(b : Nat8) : ST.InstructionState { switch (b) { case 1 #instructed; case 2 #opened; case 3 #verified; case 4 #funded; case 5 #settled; case 6 #failed; case 7 #boughtIn; case _ #cancelled } };
+  func stateCode(s : ST.InstructionState) : Nat8 { switch (s) { case (#instructed) 1; case (#opened) 2; case (#verified) 3; case (#funded) 4; case (#settled) 5; case (#failed) 6; case (#boughtIn) 7; case (#cancelled) 8; case (#matched) 9 } };
+  func stateOf(b : Nat8) : ST.InstructionState { switch (b) { case 1 #instructed; case 2 #opened; case 3 #verified; case 4 #funded; case 5 #settled; case 6 #failed; case 7 #boughtIn; case 9 #matched; case _ #cancelled } };
   public func familyCode(f : ST.Family) : Nat8 { switch (f) { case (#treasury) 0; case (#repo) 1; case (#loan) 2; case (#collateral) 3 } };
   public func familyOf(c : Nat8) : ST.Family { switch (c) { case 1 #repo; case 2 #loan; case 3 #collateral; case _ #treasury } };
   public func hash8(t : Text) : Nat { R.getNat(Blob.toArray(Sha256.fromBlob(#sha256, Text.encodeUtf8(t))), 0, 8) };
@@ -58,14 +58,14 @@ module {
     R.putNat(b, r.deal, 8); R.putNat(b, r.leg, 1); R.putNat(b, r.cycle, 4); R.putByte(b, switch (r.role) { case (#maker) 1; case (#taker) 2 });
     putPrincipal(b, r.counterparty); putPrincipal(b, r.assetLedger); R.putNat(b, r.assetAmount, 8); putPrincipal(b, r.cashLedger); R.putNat(b, r.cashAmount, 8);
     R.putNat(b, r.tradeId, 8); R.putByte(b, stateCode(r.state)); R.putNat(b, r.fails, 2); R.putBool(b, r.escrowed); R.putNat(b, r.referenceHash, 8); R.putBlob(b, r.documentHash, 32); R.putNat(b, r.lastBlock, 8);
-    R.putByte(b, familyCode(r.family));
+    R.putByte(b, familyCode(r.family)); R.putBool(b, r.matched);
     R.done(b, INSTRUCTION_ROW_BYTES)
   };
   func decodeInstruction(id : Nat, v : Blob) : InstructionRow {
     let a = Blob.toArray(v);
     { id; family = familyOf(a[180]); deal = R.getNat(a, 0, 8); leg = R.getNat(a, 8, 1); cycle = R.getNat(a, 9, 4); role = if (a[13] == 1) #maker else #taker;
       counterparty = getPrincipal(a, 14); assetLedger = getPrincipal(a, 44); assetAmount = R.getNat(a, 74, 8); cashLedger = getPrincipal(a, 82); cashAmount = R.getNat(a, 112, 8);
-      tradeId = R.getNat(a, 120, 8); state = stateOf(a[128]); fails = R.getNat(a, 129, 2); escrowed = R.getBool(a, 131); referenceHash = R.getNat(a, 132, 8); documentHash = R.getBlob(a, 140, 32); lastBlock = R.getNat(a, 172, 8) }
+      tradeId = R.getNat(a, 120, 8); state = stateOf(a[128]); fails = R.getNat(a, 129, 2); escrowed = R.getBool(a, 131); referenceHash = R.getNat(a, 132, 8); documentHash = R.getBlob(a, 140, 32); lastBlock = R.getNat(a, 172, 8); matched = R.getBool(a, 181) }
   };
   func encodeCycle(r : CycleRow) : Blob {
     let b = R.buf();
@@ -190,7 +190,11 @@ module {
   /// An instruction for a security deal's delivery leg: the deal open and its first leg unsettled, the venue and
   /// both ledgers declared, the cycle open on the deal's settlement date, no other instruction open on the leg. The
   /// amounts are the deal's: the nominal on the instrument's ledger, the settlement amount on the cash ledger.
-  public func planInstruct(s : State, treasury : TreasuryCore.State, r : TreasuryCore.DealRow, t : TT.SecurityTrade, settlementAmount : Nat, counterparty : Principal, tradeId : ?Nat, reference : Text, documentHash : Blob, day : Nat) : Res<ST.Event> {
+  /// The instrument's ledger is denominated in units of face: the market declared for the instrument names the
+  /// unit, and an instrument without a market is denominated in its minor units. A nominal that is not a whole
+  /// number of units cannot be delivered.
+  public func ledgerUnits(nominal : Nat, unitNominal : Nat) : ?Nat { if (unitNominal == 0 or nominal % unitNominal != 0) null else ?(nominal / unitNominal) };
+  public func planInstruct(s : State, treasury : TreasuryCore.State, r : TreasuryCore.DealRow, t : TT.SecurityTrade, settlementAmount : Nat, unitNominal : Nat, counterparty : Principal, tradeId : ?Nat, reference : Text, documentHash : Blob, day : Nat) : Res<ST.Event> {
     if (s.venue == null) return #err(#NoVenue);
     if (r.kind != 4) return #err(#DealNotSettleable({ deal = r.id; reason = "not a security" }));
     if (not TreasuryCore.isOpen(r)) return #err(#DealNotSettleable({ deal = r.id; reason = "the deal is " # TT.dealStateText(r.state) }));
@@ -211,12 +215,29 @@ module {
       case (_) {};
     };
     if (t.nominal == 0 or settlementAmount == 0) return bad("both legs are positive");
-    #ok(#instructed({ instruction = { family = #treasury; deal = r.id; leg = 0; cycle = t.settlement; role; counterparty; assetLedger = assetL.ledger; assetAmount = t.nominal; cashLedger = cashL.ledger; cashAmount = settlementAmount; tradeId; reference; documentHash }; day }))
+    let ?units = ledgerUnits(t.nominal, unitNominal) else return bad("the nominal is not a whole number of the ledger's units of " # Nat.toText(unitNominal));
+    #ok(#instructed({ instruction = { family = #treasury; deal = r.id; leg = 0; cycle = t.settlement; role; counterparty; assetLedger = assetL.ledger; assetAmount = units; cashLedger = cashL.ledger; cashAmount = settlementAmount; tradeId; reference; documentHash; matched = false }; day }))
+  };
+  /// A fill of a market cycle instructed: the trade is the engine's, settled by its relayer between the desk and the
+  /// participant; the amounts are the engine's (the units on the instrument's ledger, the price times the units on
+  /// the cash ledger); the trade id is set when the engine's settlement is read back, and the desk observes it.
+  public func planInstructMatched(s : State, r : TreasuryCore.DealRow, t : TT.SecurityTrade, assetLedger : Principal, cashLedger : Principal, units : Nat, cashAmount : Nat, counterparty : Principal, reference : Text, day : Nat) : Res<ST.Event> {
+    if (s.venue == null) return #err(#NoVenue);
+    if (r.kind != 4) return #err(#DealNotSettleable({ deal = r.id; reason = "not a security" }));
+    if (not TreasuryCore.isOpen(r)) return #err(#DealNotSettleable({ deal = r.id; reason = "the deal is " # TT.dealStateText(r.state) }));
+    if (TreasuryCore.legSettled(r, 0)) return #err(#DealNotSettleable({ deal = r.id; reason = "the delivery leg has settled" }));
+    switch (openInstructionOf(s, r.id, 0)) { case (?x) return #err(#AlreadyInstructed({ deal = r.id; instruction = x.id })); case null {} };
+    switch (cycle(s, t.settlement)) { case (?c) { if (c.state != #open) return #err(#NoCycle({ businessDate = t.settlement })) }; case null return #err(#NoCycle({ businessDate = t.settlement })) };
+    if (Principal.isAnonymous(counterparty)) return bad("the counterparty is a principal");
+    if (bytesOf(reference) == 0 or bytesOf(reference) > 35) return bad("the reference is 1..35 bytes");
+    if (units == 0 or cashAmount == 0) return bad("both legs are positive");
+    let role : ST.Role = if (t.direction == #sell) #maker else #taker;
+    #ok(#instructed({ instruction = { family = #treasury; deal = r.id; leg = 0; cycle = t.settlement; role; counterparty; assetLedger; assetAmount = units; cashLedger; cashAmount; tradeId = null; reference; documentHash = Blob.fromArray(Array.repeat<Nat8>(0, 32)); matched = true }; day }))
   };
   /// A financing leg instructed: the repo's or the loan's start or close, with the amounts the caller computed
   /// from the row (the collateral or the lent nominal on the instrument's ledger, the cash on the cash ledger),
   /// the role the leg's direction gives the desk, and the cycle the leg's day.
-  public func planInstructFinancing(s : State, family : ST.Family, id : Nat, leg : Nat, isin : Text, currency : Text, nominal : Nat, cashAmount : Nat, deskDelivers : Bool, cycleDay : Nat, counterparty : Principal, tradeId : ?Nat, reference : Text, day : Nat) : Res<ST.Event> {
+  public func planInstructFinancing(s : State, family : ST.Family, id : Nat, leg : Nat, isin : Text, currency : Text, nominal : Nat, unitNominal : Nat, cashAmount : Nat, deskDelivers : Bool, cycleDay : Nat, counterparty : Principal, tradeId : ?Nat, reference : Text, day : Nat) : Res<ST.Event> {
     if (s.venue == null) return #err(#NoVenue);
     if (family == #treasury) return bad("a treasury deal is instructed by its own act");
     switch (openInstructionOf(s, id, leg)) { case (?x) return #err(#AlreadyInstructed({ deal = id; instruction = x.id })); case null {} };
@@ -233,7 +254,8 @@ module {
       case (_) {};
     };
     if (nominal == 0 or cashAmount == 0) return bad("both legs are positive");
-    #ok(#instructed({ instruction = { family; deal = id; leg; cycle = cycleDay; role; counterparty; assetLedger = assetL.ledger; assetAmount = nominal; cashLedger = cashL.ledger; cashAmount; tradeId; reference; documentHash = Blob.fromArray(Array.repeat<Nat8>(0, 32)) }; day }))
+    let ?units = ledgerUnits(nominal, unitNominal) else return bad("the nominal is not a whole number of the ledger's units of " # Nat.toText(unitNominal));
+    #ok(#instructed({ instruction = { family; deal = id; leg; cycle = cycleDay; role; counterparty; assetLedger = assetL.ledger; assetAmount = units; cashLedger = cashL.ledger; cashAmount; tradeId; reference; documentHash = Blob.fromArray(Array.repeat<Nat8>(0, 32)); matched = false }; day }))
   };
 
   /// What the driver does next for an instruction, from its row alone.
@@ -248,6 +270,8 @@ module {
   };
   public func nextStep(r : InstructionRow) : NextStep {
     switch (r.state) {
+      // a matched fill: the engine's trade is observed; with none set yet, the cycle's driver reads it from the engine
+      case (#matched) { if (r.tradeId != 0) #observe({ tradeId = r.tradeId }) else #nothing({ reason = "awaiting the engine's trade" }) };
       case (#instructed) {
         switch (r.role) {
           case (#maker) { if (r.tradeId != 0) #resetTrade({ previous = r.tradeId }) else #openTrade };
@@ -364,7 +388,7 @@ module {
       case (#instructed(x)) {
         let i = x.instruction;
         let r : InstructionRow = { id = block; family = i.family; deal = i.deal; leg = i.leg; cycle = i.cycle; role = i.role; counterparty = i.counterparty; assetLedger = i.assetLedger; assetAmount = i.assetAmount; cashLedger = i.cashLedger; cashAmount = i.cashAmount;
-                                   tradeId = switch (i.tradeId) { case (?t) t; case null 0 }; state = #instructed; fails = 0; escrowed = false; referenceHash = hash8(i.reference); documentHash = i.documentHash; lastBlock = block };
+                                   tradeId = switch (i.tradeId) { case (?t) t; case null 0 }; state = if (i.matched) #matched else #instructed; fails = 0; escrowed = false; referenceHash = hash8(i.reference); documentHash = i.documentHash; lastBlock = block; matched = i.matched };
         index(s, r);
         ignore RI.put(s.byDeal, R.key2(i.deal, 8, i.leg, 1), R.key(block, 8));
         ignore RI.put(s.byCycle, R.key2(i.cycle, 4, block, 8), Blob.fromArray([1]));
@@ -395,7 +419,8 @@ module {
         bumpCycle(s, x.cycle, block, func(c) { { c with instructions = c.instructions + 1; pending = c.pending + 1 } });
       };
       case (#reclaimed(x)) withState(s, x.instruction, block, func(r) { { r with escrowed = false } });
-      case (#tradeReset(x)) withState(s, x.instruction, block, func(r) { { r with tradeId = 0; escrowed = false; state = switch (r.state) { case (#opened or #verified or #funded) #instructed; case (st) st } } });
+      // a matched fill whose engine trade will not settle becomes an ordinary instruction: the desk opens or funds the trade itself
+      case (#tradeReset(x)) withState(s, x.instruction, block, func(r) { { r with tradeId = 0; escrowed = false; state = switch (r.state) { case (#opened or #verified or #funded or #matched) #instructed; case (st) st } } });
       case (#tradeAssigned(x)) withState(s, x.instruction, block, func(r) { { r with tradeId = x.tradeId; escrowed = false } });
       case (#boughtIn(x)) withState(s, x.instruction, block, func(r) { { r with state = #boughtIn } });
       case (#cancelled(x)) withState(s, x.instruction, block, func(r) { { r with state = #cancelled } });

@@ -71,15 +71,15 @@ let buyId = capture(#security(buy));
 let ?buyRow = Treasury.row(t, buyId) else Runtime.trap("FAIL: a row is missing");
 
 // ─── the venue, the ledgers, a cycle ───
-refusedC(Core.planInstruct(c, t, buyRow, buy, 1, cp, ?1, "REF", S.h(1), D0), "instruct before the venue");
+refusedC(Core.planInstruct(c, t, buyRow, buy, 1, 1, cp, ?1, "REF", S.h(1), D0), "instruct before the venue");
 refusedC(Core.planVenue({ core = coreP; deadlineSecs = 0; recycleLimit = 3; claimsAccount = "1540" }), "a zero deadline");
 ignore applyS(okC(Core.planVenue({ core = coreP; deadlineSecs = 3600; recycleLimit = 2; claimsAccount = "1540" }), "venue"));
 refusedC(Core.planLedger({ role = #cash({ currency = "EG" }); ledger = cashL; partial = false }), "a two-letter currency");
 refusedC(Core.planLedger({ role = #cash({ currency = EGP }); ledger = cashL; partial = true }), "a partial cash ledger");
 ignore applyS(okC(Core.planLedger({ role = #cash({ currency = EGP }); ledger = cashL; partial = false }), "cash ledger"));
-refusedC(Core.planInstruct(c, t, buyRow, buy, 1, cp, ?1, "REF", S.h(1), D0), "instruct without the instrument's ledger");
+refusedC(Core.planInstruct(c, t, buyRow, buy, 1, 1, cp, ?1, "REF", S.h(1), D0), "instruct without the instrument's ledger");
 ignore applyS(okC(Core.planLedger({ role = #security({ isin = bond.isin }); ledger = secL; partial = true }), "security ledger"));
-refusedC(Core.planInstruct(c, t, buyRow, buy, 1, cp, ?1, "REF", S.h(1), D0), "instruct without a cycle");
+refusedC(Core.planInstruct(c, t, buyRow, buy, 1, 1, cp, ?1, "REF", S.h(1), D0), "instruct without a cycle");
 refusedC(Core.planOpenCycle(c, { businessDate = D0 - 1; market = "EGX"; priceSource = "EGX closing" }, D0), "a cycle in the past");
 ignore applyS(okC(Core.planOpenCycle(c, { businessDate = D0 + 2; market = "EGX"; priceSource = "EGX closing" }, D0), "cycle"));
 refusedC(Core.planOpenCycle(c, { businessDate = D0 + 2; market = "EGX"; priceSource = "EGX closing" }, D0), "a cycle twice");
@@ -87,10 +87,10 @@ check(Core.ledgers(c).size() == 2, "two ledgers declared");
 Debug.print("count: venue, ledgers and cycle declared = 4");
 
 // ─── a purchase instructed: the desk is the taker of the counterparty's trade ───
-refusedC(Core.planInstruct(c, t, buyRow, buy, 9_850_000_00, cp, null, "REF", S.h(1), D0), "a purchase without the counterparty's trade id");
-refusedC(Core.planInstruct(c, t, buyRow, buy, 9_850_000_00, cp, ?7, "", S.h(1), D0), "an empty reference");
-let ins1 = applyS(okC(Core.planInstruct(c, t, buyRow, buy, 9_850_000_00, cp, ?7, "REF-buy", S.h(1), D0), "instruct the purchase"));
-refusedC(Core.planInstruct(c, t, buyRow, buy, 9_850_000_00, cp, ?7, "REF-buy", S.h(1), D0), "instruct twice");
+refusedC(Core.planInstruct(c, t, buyRow, buy, 9_850_000_00, 1, cp, null, "REF", S.h(1), D0), "a purchase without the counterparty's trade id");
+refusedC(Core.planInstruct(c, t, buyRow, buy, 9_850_000_00, 1, cp, ?7, "", S.h(1), D0), "an empty reference");
+let ins1 = applyS(okC(Core.planInstruct(c, t, buyRow, buy, 9_850_000_00, 1, cp, ?7, "REF-buy", S.h(1), D0), "instruct the purchase"));
+refusedC(Core.planInstruct(c, t, buyRow, buy, 9_850_000_00, 1, cp, ?7, "REF-buy", S.h(1), D0), "instruct twice");
 let ?r1 = Core.instruction(c, ins1) else Runtime.trap("FAIL: a row is missing");
 check(r1.role == #taker and r1.tradeId == 7 and r1.assetAmount == buy.nominal and r1.cashAmount == 9_850_000_00 and r1.cycle == D0 + 2, "the instruction's legs are the deal's");
 check(Core.openInstructionOf(c, buyId, 0) != null, "the leg is in Tachyon's hands");
@@ -152,10 +152,10 @@ ignore applyT(okT(Treasury.planSettleLeg(t, buyRow, #security(buy), 0, D0 + 2, c
 let sell : TT.SecurityTrade = { buy with direction = #sell; nominal = 4_000_000_00; priceMicro = 99_000_000; settlement = D0 + 3 };
 let sellId = capture(#security(sell));
 let ?sellRow = Treasury.row(t, sellId) else Runtime.trap("FAIL: a row is missing");
-refusedC(Core.planInstruct(c, t, sellRow, sell, 3_960_000_00, cp, ?9, "REF-sell", S.h(1), D0), "a sale with a trade id");
-refusedC(Core.planInstruct(c, t, sellRow, sell, 3_960_000_00, cp, null, "REF-sell", S.h(1), D0), "a sale whose settlement date has no cycle");
+refusedC(Core.planInstruct(c, t, sellRow, sell, 3_960_000_00, 1, cp, ?9, "REF-sell", S.h(1), D0), "a sale with a trade id");
+refusedC(Core.planInstruct(c, t, sellRow, sell, 3_960_000_00, 1, cp, null, "REF-sell", S.h(1), D0), "a sale whose settlement date has no cycle");
 ignore applyS(okC(Core.planOpenCycle(c, { businessDate = D0 + 3; market = "EGX"; priceSource = "EGX closing" }, D0), "cycle 2"));
-let ins2 = applyS(okC(Core.planInstruct(c, t, sellRow, sell, 3_960_000_00, cp, null, "REF-sell", S.h(1), D0), "instruct the sale"));
+let ins2 = applyS(okC(Core.planInstruct(c, t, sellRow, sell, 3_960_000_00, 1, cp, null, "REF-sell", S.h(1), D0), "instruct the sale"));
 let ?r2 = Core.instruction(c, ins2) else Runtime.trap("FAIL: a row is missing");
 check(r2.role == #maker and Core.nextStep(r2) == #openTrade, "a sale's first step opens the trade");
 ignore applyS(#tradeOpened({ instruction = ins2; tradeId = 11; escrowed = false; note = "asset escrow not yet in"; day = D0 }));

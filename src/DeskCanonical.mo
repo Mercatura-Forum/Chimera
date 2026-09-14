@@ -42,6 +42,9 @@ import VT "ValuationTypes";
 import CoT "CollateralTypes";
 import LT "LimitTypes";
 import RT "ReconciliationTypes";
+import LQ "LiquidityTypes";
+import FeT "FeedTypes";
+import MkT "MarketTypes";
 import TT "mo:manticore/TreasuryTypes";
 
 import T "DeskTypes";
@@ -231,13 +234,13 @@ module {
   func rFamily(r : JC.Reader) : ?ST.Family { switch (r.byte()) { case (?0) ?#treasury; case (?1) ?#repo; case (?2) ?#loan; case (?3) ?#collateral; case (_) null } };
   func wInstruction(w : JC.Writer, i : ST.Instruction) {
     wFamily(w, i.family); w.nat(i.deal); w.nat(i.leg); w.nat(i.cycle); wRole(w, i.role); w.principal(i.counterparty); w.principal(i.assetLedger); w.nat(i.assetAmount); w.principal(i.cashLedger); w.nat(i.cashAmount);
-    w.optNat(i.tradeId); w.text(i.reference); w.blob(i.documentHash);
+    w.optNat(i.tradeId); w.text(i.reference); w.blob(i.documentHash); w.bool(i.matched);
   };
   func rInstruction(r : JC.Reader) : ?ST.Instruction {
     let ?family = rFamily(r) else return null; let ?deal = r.nat() else return null; let ?leg = r.nat() else return null; let ?cycle = r.nat() else return null; let ?role = rRole(r) else return null; let ?counterparty = r.principal() else return null;
     let ?assetLedger = r.principal() else return null; let ?assetAmount = r.nat() else return null; let ?cashLedger = r.principal() else return null; let ?cashAmount = r.nat() else return null;
-    let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; let ?documentHash = r.blob() else return null;
-    ?{ family; deal; leg; cycle; role; counterparty; assetLedger; assetAmount; cashLedger; cashAmount; tradeId; reference; documentHash }
+    let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; let ?documentHash = r.blob() else return null; let ?matched = r.bool() else return null;
+    ?{ family; deal; leg; cycle; role; counterparty; assetLedger; assetAmount; cashLedger; cashAmount; tradeId; reference; documentHash; matched }
   };
   // ─── financing ───
   func wCollateral(w : JC.Writer, c : FT.Collateral) { w.text(c.isin); w.nat(c.nominal) };
@@ -497,6 +500,161 @@ module {
       case (_) null;
     }
   };
+  // ─── liquidity ───
+  func wLevel(w : JC.Writer, l : LQ.HqlaLevel) { w.byte(switch (l) { case (#level1) 1; case (#level2A) 2; case (#level2B) 3; case (#none) 4 }) };
+  func rLevel(r : JC.Reader) : ?LQ.HqlaLevel { switch (r.byte()) { case (?1) ?#level1; case (?2) ?#level2A; case (?3) ?#level2B; case (?4) ?#none; case (_) null } };
+  func wCpType(w : JC.Writer, t : LQ.CounterpartyType) { w.byte(switch (t) { case (#retailStable) 1; case (#retailLessStable) 2; case (#smallBusiness) 3; case (#nonFinancialCorporate) 4; case (#sovereign) 5; case (#centralBank) 6; case (#financial) 7; case (#operational) 8 }) };
+  func rCpType(r : JC.Reader) : ?LQ.CounterpartyType { switch (r.byte()) { case (?1) ?#retailStable; case (?2) ?#retailLessStable; case (?3) ?#smallBusiness; case (?4) ?#nonFinancialCorporate; case (?5) ?#sovereign; case (?6) ?#centralBank; case (?7) ?#financial; case (?8) ?#operational; case (_) null } };
+  func wRates(w : JC.Writer, xs : [LQ.Rate]) { w.len16(xs.size()); for (x in xs.vals()) { wCpType(w, x.counterpartyType); w.nat(x.bps) } };
+  func rRates(r : JC.Reader) : ?[LQ.Rate] {
+    let ?n = r.len16() else return null; if (n > 64) return null;
+    let out = List.empty<LQ.Rate>(); var i = 0;
+    while (i < n) { let ?counterpartyType = rCpType(r) else return null; let ?bps = r.nat() else return null; List.add(out, { counterpartyType; bps }); i += 1 };
+    ?List.toArray(out)
+  };
+  func wLevels(w : JC.Writer, xs : [LQ.LevelFactor]) { w.len16(xs.size()); for (x in xs.vals()) { wLevel(w, x.level); w.nat(x.bps) } };
+  func rLevels(r : JC.Reader) : ?[LQ.LevelFactor] {
+    let ?n = r.len16() else return null; if (n > 64) return null;
+    let out = List.empty<LQ.LevelFactor>(); var i = 0;
+    while (i < n) { let ?level = rLevel(r) else return null; let ?bps = r.nat() else return null; List.add(out, { level; bps }); i += 1 };
+    ?List.toArray(out)
+  };
+  func wFactors(w : JC.Writer, f : LQ.Factors) {
+    wLevels(w, f.hqlaHaircuts); w.nat(f.level2CapBps); w.nat(f.level2BCapBps); wRates(w, f.runoff); wRates(w, f.inflow); w.nat(f.inflowCapBps);
+    wRates(w, f.asfUnderSixMonths); wRates(w, f.asfSixToTwelve); w.nat(f.asfOverYearBps);
+    wLevels(w, f.rsfHqla); wRates(w, f.rsfUnderSixMonths); wRates(w, f.rsfSixToTwelve); wRates(w, f.rsfOverYear); w.nat(f.rsfDerivativesBps);
+    w.nat(f.largeExposureBps); w.nat(f.largeExposureReportBps);
+  };
+  func rFactors(r : JC.Reader) : ?LQ.Factors {
+    let ?hqlaHaircuts = rLevels(r) else return null; let ?level2CapBps = r.nat() else return null; let ?level2BCapBps = r.nat() else return null;
+    let ?runoff = rRates(r) else return null; let ?inflow = rRates(r) else return null; let ?inflowCapBps = r.nat() else return null;
+    let ?asfUnderSixMonths = rRates(r) else return null; let ?asfSixToTwelve = rRates(r) else return null; let ?asfOverYearBps = r.nat() else return null;
+    let ?rsfHqla = rLevels(r) else return null; let ?rsfUnderSixMonths = rRates(r) else return null; let ?rsfSixToTwelve = rRates(r) else return null; let ?rsfOverYear = rRates(r) else return null; let ?rsfDerivativesBps = r.nat() else return null;
+    let ?largeExposureBps = r.nat() else return null; let ?largeExposureReportBps = r.nat() else return null;
+    ?{ hqlaHaircuts; level2CapBps; level2BCapBps; runoff; inflow; inflowCapBps; asfUnderSixMonths; asfSixToTwelve; asfOverYearBps; rsfHqla; rsfUnderSixMonths; rsfSixToTwelve; rsfOverYear; rsfDerivativesBps; largeExposureBps; largeExposureReportBps }
+  };
+  func wLiquidityEvent(w : JC.Writer, e : LQ.Event) {
+    switch (e) {
+      case (#factorsSet(x)) { w.byte(0x01); wFactors(w, x.factors); w.nat(x.day) };
+      case (#instrumentClassified(x)) { w.byte(0x02); w.text(x.isin); wLevel(w, x.level); w.nat(x.day) };
+      case (#counterpartyClassified(x)) { w.byte(0x03); w.text(x.name); wCpType(w, x.counterpartyType); w.nat(x.day) };
+      case (#capitalDeclared(x)) { w.byte(0x04); w.text(x.currency); w.nat(x.amount); w.nat(x.day) };
+    }
+  };
+  func rLiquidityEvent(r : JC.Reader) : ?LQ.Event {
+    switch (r.byte()) {
+      case (?0x01) { let ?factors = rFactors(r) else return null; let ?day = r.nat() else return null; ?#factorsSet({ factors; day }) };
+      case (?0x02) { let ?isin = r.text() else return null; let ?level = rLevel(r) else return null; let ?day = r.nat() else return null; ?#instrumentClassified({ isin; level; day }) };
+      case (?0x03) { let ?name = r.text() else return null; let ?counterpartyType = rCpType(r) else return null; let ?day = r.nat() else return null; ?#counterpartyClassified({ name; counterpartyType; day }) };
+      case (?0x04) { let ?currency = r.text() else return null; let ?amount = r.nat() else return null; let ?day = r.nat() else return null; ?#capitalDeclared({ currency; amount; day }) };
+      case (_) null;
+    }
+  };
+  // ─── the feed ───
+  func wFeed(w : JC.Writer, f : FeT.Feed) { w.text(f.isin); w.len16(f.sources.size()); for (x in f.sources.vals()) { w.text(x.id); w.blob(x.publicKey) }; w.nat(f.bandBps); w.nat(f.staleSeconds) };
+  func rFeed(r : JC.Reader) : ?FeT.Feed {
+    let ?isin = r.text() else return null; let ?n = r.len16() else return null; if (n > 64) return null;
+    let out = List.empty<FeT.Source>(); var i = 0;
+    while (i < n) { let ?id = r.text() else return null; let ?publicKey = r.blob() else return null; List.add(out, { id; publicKey }); i += 1 };
+    let ?bandBps = r.nat() else return null; let ?staleSeconds = r.nat() else return null;
+    ?{ isin; sources = List.toArray(out); bandBps; staleSeconds }
+  };
+  func wSubmission(w : JC.Writer, x : FeT.Submission) { w.text(x.isin); w.text(x.source); w.nat(x.priceMicro); w.nat64(x.asOf); w.blob(x.signature) };
+  func rSubmission(r : JC.Reader) : ?FeT.Submission {
+    let ?isin = r.text() else return null; let ?source = r.text() else return null; let ?priceMicro = r.nat() else return null; let ?asOf = r.nat64() else return null; let ?signature = r.blob() else return null;
+    ?{ isin; source; priceMicro; asOf; signature }
+  };
+  func wFigures(w : JC.Writer, xs : [FeT.Figure]) { w.len16(xs.size()); for (x in xs.vals()) { w.text(x.source); w.nat(x.priceMicro); w.nat64(x.asOf) } };
+  func rFigures(r : JC.Reader) : ?[FeT.Figure] {
+    let ?n = r.len16() else return null; if (n > 64) return null;
+    let out = List.empty<FeT.Figure>(); var i = 0;
+    while (i < n) { let ?source = r.text() else return null; let ?priceMicro = r.nat() else return null; let ?asOf = r.nat64() else return null; List.add(out, { source; priceMicro; asOf }); i += 1 };
+    ?List.toArray(out)
+  };
+  func wHalt(w : JC.Writer, x : FeT.HaltReason) { w.byte(switch (x) { case (#disagreement) 1; case (#stale) 2 }) };
+  func rHalt(r : JC.Reader) : ?FeT.HaltReason { switch (r.byte()) { case (?1) ?#disagreement; case (?2) ?#stale; case (_) null } };
+  func wFeedEvent(w : JC.Writer, e : FeT.Event) {
+    switch (e) {
+      case (#feedDeclared(x)) { w.byte(0x01); wFeed(w, x.feed); w.nat(x.day) };
+      case (#priceSubmitted(x)) { w.byte(0x02); w.text(x.isin); w.text(x.source); w.nat(x.priceMicro); w.nat64(x.asOf); w.blob(x.signature); w.nat(x.day) };
+      case (#priceAccepted(x)) { w.byte(0x03); w.text(x.isin); w.nat(x.priceMicro); w.nat64(x.asOf); wFigures(w, x.figures); w.nat(x.day) };
+      case (#instrumentHalted(x)) { w.byte(0x04); w.text(x.isin); wHalt(w, x.reason); wFigures(w, x.figures); w.nat(x.day) };
+      case (#haltLifted(x)) { w.byte(0x05); w.text(x.isin); w.nat(x.day) };
+    }
+  };
+  func rFeedEvent(r : JC.Reader) : ?FeT.Event {
+    switch (r.byte()) {
+      case (?0x01) { let ?feed = rFeed(r) else return null; let ?day = r.nat() else return null; ?#feedDeclared({ feed; day }) };
+      case (?0x02) { let ?isin = r.text() else return null; let ?source = r.text() else return null; let ?priceMicro = r.nat() else return null; let ?asOf = r.nat64() else return null; let ?signature = r.blob() else return null; let ?day = r.nat() else return null; ?#priceSubmitted({ isin; source; priceMicro; asOf; signature; day }) };
+      case (?0x03) { let ?isin = r.text() else return null; let ?priceMicro = r.nat() else return null; let ?asOf = r.nat64() else return null; let ?figures = rFigures(r) else return null; let ?day = r.nat() else return null; ?#priceAccepted({ isin; priceMicro; asOf; figures; day }) };
+      case (?0x04) { let ?isin = r.text() else return null; let ?reason = rHalt(r) else return null; let ?figures = rFigures(r) else return null; let ?day = r.nat() else return null; ?#instrumentHalted({ isin; reason; figures; day }) };
+      case (?0x05) { let ?isin = r.text() else return null; let ?day = r.nat() else return null; ?#haltLifted({ isin; day }) };
+      case (_) null;
+    }
+  };
+  // ─── the market ───
+  func wMarket(w : JC.Writer, m : MkT.Market) {
+    w.text(m.isin); w.principal(m.engine); w.principal(m.sharesLedger); w.principal(m.cashLedger); w.text(m.currency); w.nat(m.unitNominal); w.nat(m.deadlineSecs);
+    w.len16(m.participants.size()); for (p in m.participants.vals()) { w.principal(p.principal); TyCan.writeCounterparty(w, p.counterparty) };
+  };
+  func rMarket(r : JC.Reader) : ?MkT.Market {
+    let ?isin = r.text() else return null; let ?engine = r.principal() else return null; let ?sharesLedger = r.principal() else return null; let ?cashLedger = r.principal() else return null;
+    let ?currency = r.text() else return null; let ?unitNominal = r.nat() else return null; let ?deadlineSecs = r.nat() else return null;
+    let ?n = r.len16() else return null; if (n > 4096) return null;
+    let out = List.empty<MkT.Participant>(); var i = 0;
+    while (i < n) { let ?principal = r.principal() else return null; let ?counterparty = TyCan.readCounterparty(r) else return null; List.add(out, { principal; counterparty }); i += 1 };
+    ?{ isin; engine; sharesLedger; cashLedger; currency; unitNominal; deadlineSecs; participants = List.toArray(out) }
+  };
+  func wOrderSide(w : JC.Writer, x : MkT.Side) { w.byte(switch (x) { case (#buy) 1; case (#sell) 2 }) };
+  func rOrderSide(r : JC.Reader) : ?MkT.Side { switch (r.byte()) { case (?1) ?#buy; case (?2) ?#sell; case (_) null } };
+  func wAccounting(w : JC.Writer, c : TT.Classification) { w.byte(switch (c) { case (#amortisedCost) 0; case (#fvoci) 1; case (#fvtpl) 2 }) };
+  func rAccounting(r : JC.Reader) : ?TT.Classification { switch (r.byte()) { case (?0) ?#amortisedCost; case (?1) ?#fvoci; case (?2) ?#fvtpl; case (_) null } };
+  func wOrderTerms(w : JC.Writer, t : MkT.OrderTerms) { w.text(t.book); w.text(t.isin); wOrderSide(w, t.side); w.nat(t.units); wAccounting(w, t.classification); wCash(w, t.cash); w.text(t.reference) };
+  func rOrderTerms(r : JC.Reader) : ?MkT.OrderTerms {
+    let ?book = r.text() else return null; let ?isin = r.text() else return null; let ?side = rOrderSide(r) else return null; let ?units = r.nat() else return null; let ?classification = rAccounting(r) else return null; let ?cash = rCash(r) else return null; let ?reference = r.text() else return null;
+    ?{ book; isin; side; units; classification; cash; reference }
+  };
+  func wMarketEvent(w : JC.Writer, e : MkT.Event) {
+    switch (e) {
+      case (#marketDeclared(x)) { w.byte(0x01); wMarket(w, x.market); w.nat(x.day) };
+      case (#orderStaged(x)) { w.byte(0x02); wOrderTerms(w, x.terms); w.principal(x.trader); w.bool(x.withinLimits); TyCan.writeOptPrincipal(w, x.approver); w.nat(x.day) };
+      case (#orderCancelled(x)) { w.byte(0x03); w.nat(x.order); w.text(x.reason); w.nat(x.day) };
+      case (#cycleOpened(x)) { w.byte(0x04); w.text(x.isin); w.nat(x.referenceMicro); w.nat(x.referenceBlock); wNats(w, x.orders); w.nat(x.day) };
+      case (#orderSubmitted(x)) { w.byte(0x05); w.nat(x.cycle); w.nat(x.order); w.nat(x.engineOrder); w.nat(x.window); w.nat(x.limit); w.nat(x.day) };
+      case (#orderRefused(x)) { w.byte(0x06); w.nat(x.cycle); w.nat(x.order); w.text(x.reason); w.nat(x.day) };
+      case (#clearAdvanced(x)) { w.byte(0x07); w.nat(x.cycle); w.nat(x.window); w.optNat(x.clearingPrice); w.nat(x.targetVolume); w.nat(x.filled); w.nat(x.chunks); w.bool(x.complete); w.nat(x.day) };
+      case (#filled(x)) { w.byte(0x08); w.nat(x.cycle); w.nat(x.order); w.nat(x.seq); w.nat(x.price); w.nat(x.units); w.principal(x.counterparty); w.nat(x.day) };
+      case (#fillUnattributed(x)) { w.byte(0x09); w.nat(x.cycle); w.nat(x.seq); w.principal(x.counterparty); w.nat(x.day) };
+      case (#fillCaptured(x)) { w.byte(0x0A); w.nat(x.cycle); w.nat(x.seq); w.nat(x.deal); w.nat(x.day) };
+      case (#fillInstructed(x)) { w.byte(0x0B); w.nat(x.cycle); w.nat(x.seq); w.nat(x.deal); w.nat(x.instruction); w.nat(x.day) };
+      case (#fillTradeSet(x)) { w.byte(0x0C); w.nat(x.cycle); w.nat(x.seq); w.nat(x.tradeId); w.nat(x.day) };
+      case (#fillsRead(x)) { w.byte(0x0D); w.nat(x.cycle); w.nat(x.through); w.nat(x.fills); w.bool(x.complete); w.nat(x.day) };
+      case (#orderWithdrawn(x)) { w.byte(0x10); w.nat(x.cycle); w.nat(x.order); w.nat(x.engineOrder); w.nat(x.day) };
+      case (#callRefused(x)) { w.byte(0x0E); w.nat(x.cycle); w.text(x.step); w.text(x.reason); w.nat(x.day) };
+      case (#cycleClosed(x)) { w.byte(0x0F); w.nat(x.cycle); w.nat(x.fills); wNats(w, x.unfilled); w.nat(x.day) };
+    }
+  };
+  func rMarketEvent(r : JC.Reader) : ?MkT.Event {
+    switch (r.byte()) {
+      case (?0x01) { let ?market = rMarket(r) else return null; let ?day = r.nat() else return null; ?#marketDeclared({ market; day }) };
+      case (?0x02) { let ?terms = rOrderTerms(r) else return null; let ?trader = r.principal() else return null; let ?withinLimits = r.bool() else return null; let ?approver = TyCan.readOptPrincipal(r) else return null; let ?day = r.nat() else return null; ?#orderStaged({ terms; trader; withinLimits; approver; day }) };
+      case (?0x03) { let ?order = r.nat() else return null; let ?reason = r.text() else return null; let ?day = r.nat() else return null; ?#orderCancelled({ order; reason; day }) };
+      case (?0x04) { let ?isin = r.text() else return null; let ?referenceMicro = r.nat() else return null; let ?referenceBlock = r.nat() else return null; let ?orders = rNats(r) else return null; let ?day = r.nat() else return null; ?#cycleOpened({ isin; referenceMicro; referenceBlock; orders; day }) };
+      case (?0x05) { let ?cycle = r.nat() else return null; let ?order = r.nat() else return null; let ?engineOrder = r.nat() else return null; let ?window = r.nat() else return null; let ?limit = r.nat() else return null; let ?day = r.nat() else return null; ?#orderSubmitted({ cycle; order; engineOrder; window; limit; day }) };
+      case (?0x06) { let ?cycle = r.nat() else return null; let ?order = r.nat() else return null; let ?reason = r.text() else return null; let ?day = r.nat() else return null; ?#orderRefused({ cycle; order; reason; day }) };
+      case (?0x07) { let ?cycle = r.nat() else return null; let ?window = r.nat() else return null; let ?clearingPrice = r.optNat() else return null; let ?targetVolume = r.nat() else return null; let ?filled = r.nat() else return null; let ?chunks = r.nat() else return null; let ?complete = r.bool() else return null; let ?day = r.nat() else return null; ?#clearAdvanced({ cycle; window; clearingPrice; targetVolume; filled; chunks; complete; day }) };
+      case (?0x08) { let ?cycle = r.nat() else return null; let ?order = r.nat() else return null; let ?seq = r.nat() else return null; let ?price = r.nat() else return null; let ?units = r.nat() else return null; let ?counterparty = r.principal() else return null; let ?day = r.nat() else return null; ?#filled({ cycle; order; seq; price; units; counterparty; day }) };
+      case (?0x09) { let ?cycle = r.nat() else return null; let ?seq = r.nat() else return null; let ?counterparty = r.principal() else return null; let ?day = r.nat() else return null; ?#fillUnattributed({ cycle; seq; counterparty; day }) };
+      case (?0x0A) { let ?cycle = r.nat() else return null; let ?seq = r.nat() else return null; let ?deal = r.nat() else return null; let ?day = r.nat() else return null; ?#fillCaptured({ cycle; seq; deal; day }) };
+      case (?0x0B) { let ?cycle = r.nat() else return null; let ?seq = r.nat() else return null; let ?deal = r.nat() else return null; let ?instruction = r.nat() else return null; let ?day = r.nat() else return null; ?#fillInstructed({ cycle; seq; deal; instruction; day }) };
+      case (?0x0C) { let ?cycle = r.nat() else return null; let ?seq = r.nat() else return null; let ?tradeId = r.nat() else return null; let ?day = r.nat() else return null; ?#fillTradeSet({ cycle; seq; tradeId; day }) };
+      case (?0x0D) { let ?cycle = r.nat() else return null; let ?through = r.nat() else return null; let ?fills = r.nat() else return null; let ?complete = r.bool() else return null; let ?day = r.nat() else return null; ?#fillsRead({ cycle; through; fills; complete; day }) };
+      case (?0x10) { let ?cycle = r.nat() else return null; let ?order = r.nat() else return null; let ?engineOrder = r.nat() else return null; let ?day = r.nat() else return null; ?#orderWithdrawn({ cycle; order; engineOrder; day }) };
+      case (?0x0E) { let ?cycle = r.nat() else return null; let ?step = r.text() else return null; let ?reason = r.text() else return null; let ?day = r.nat() else return null; ?#callRefused({ cycle; step; reason; day }) };
+      case (?0x0F) { let ?cycle = r.nat() else return null; let ?fills = r.nat() else return null; let ?unfilled = rNats(r) else return null; let ?day = r.nat() else return null; ?#cycleClosed({ cycle; fills; unfilled; day }) };
+      case (_) null;
+    }
+  };
   func wPayer(w : JC.Writer, p : FT.MarginPayer) { w.byte(switch (p) { case (#desk) 1; case (#counterparty) 2 }) };
   func rPayer(r : JC.Reader) : ?FT.MarginPayer { switch (r.byte()) { case (?1) ?#desk; case (?2) ?#counterparty; case (_) null } };
   func wFinancingEvent(w : JC.Writer, e : FT.Event) {
@@ -704,6 +862,17 @@ module {
       case (#recordDepotStatement(x)) { w.byte(0xB2); w.text(x.depot); w.blob(x.document) };
       case (#resolveDepotBreak(x)) { w.byte(0xB3); w.nat(x.break_); w.text(x.resolution); w.optNat(x.correction) };
       case (#resolveCashBreak(x)) { w.byte(0xB4); w.nat(x.break_); w.text(x.resolution); w.optNat(x.correction) };
+      case (#setLiquidityFactors(f)) { w.byte(0xC0); wFactors(w, f) };
+      case (#classifyInstrument(x)) { w.byte(0xC1); w.text(x.isin); wLevel(w, x.level) };
+      case (#classifyCounterparty(x)) { w.byte(0xC2); w.text(x.name); wCpType(w, x.counterpartyType) };
+      case (#declareCapital(x)) { w.byte(0xC3); w.text(x.currency); w.nat(x.amount) };
+      case (#declareFeed(x)) { w.byte(0xD0); wFeed(w, x.feed) };
+      case (#submitPrice(x)) { w.byte(0xD1); wSubmission(w, x.submission) };
+      case (#liftHalt(x)) { w.byte(0xD2); w.text(x.isin) };
+      case (#declareMarket(x)) { w.byte(0xD3); wMarket(w, x.market) };
+      case (#stageOrder(x)) { w.byte(0xD4); wOrderTerms(w, x.terms); TyCan.writeOptPrincipal(w, x.approver) };
+      case (#cancelOrder(x)) { w.byte(0xD5); w.nat(x.order); w.text(x.reason) };
+      case (#openMarketCycle(x)) { w.byte(0xD6); w.text(x.isin); TyCan.writeOptPrincipal(w, x.approver) };
       case (#setTreasuryPolicy(p)) { w.byte(0x20); TyCan.writePolicy(w, p) };
       case (#registerSecurity(x)) { w.byte(0x21); TyCan.writeSecurityTerms(w, x.terms) };
       case (#publishCurve(x)) { w.byte(0x22); TyCan.writeCurve(w, x.curve) };
@@ -818,6 +987,17 @@ module {
       case 0xB2 { let ?depot = r.text() else return null; let ?document = r.blob() else return null; ?#recordDepotStatement({ depot; document }) };
       case 0xB3 { let ?break_ = r.nat() else return null; let ?resolution = r.text() else return null; let ?correction = r.optNat() else return null; ?#resolveDepotBreak({ break_; resolution; correction }) };
       case 0xB4 { let ?break_ = r.nat() else return null; let ?resolution = r.text() else return null; let ?correction = r.optNat() else return null; ?#resolveCashBreak({ break_; resolution; correction }) };
+      case 0xC0 { let ?f = rFactors(r) else return null; ?#setLiquidityFactors(f) };
+      case 0xC1 { let ?isin = r.text() else return null; let ?level = rLevel(r) else return null; ?#classifyInstrument({ isin; level }) };
+      case 0xC2 { let ?name = r.text() else return null; let ?counterpartyType = rCpType(r) else return null; ?#classifyCounterparty({ name; counterpartyType }) };
+      case 0xC3 { let ?currency = r.text() else return null; let ?amount = r.nat() else return null; ?#declareCapital({ currency; amount }) };
+      case 0xD0 { let ?feed = rFeed(r) else return null; ?#declareFeed({ feed }) };
+      case 0xD1 { let ?submission = rSubmission(r) else return null; ?#submitPrice({ submission }) };
+      case 0xD2 { let ?isin = r.text() else return null; ?#liftHalt({ isin }) };
+      case 0xD3 { let ?market = rMarket(r) else return null; ?#declareMarket({ market }) };
+      case 0xD4 { let ?terms = rOrderTerms(r) else return null; let ?approver = TyCan.readOptPrincipal(r) else return null; ?#stageOrder({ terms; approver }) };
+      case 0xD5 { let ?order = r.nat() else return null; let ?reason = r.text() else return null; ?#cancelOrder({ order; reason }) };
+      case 0xD6 { let ?isin = r.text() else return null; let ?approver = TyCan.readOptPrincipal(r) else return null; ?#openMarketCycle({ isin; approver }) };
       case 0x79 { let ?family = rFamily(r) else return null; let ?id = r.nat() else return null; let ?leg = r.nat() else return null; let ?counterparty = r.principal() else return null; let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; ?#instructFinancing({ family; id; leg; counterparty; tradeId; reference }) };
       case 0x20 { let ?p = TyCan.readPolicy(r) else return null; ?#setTreasuryPolicy(p) };
       case 0x21 { let ?terms = TyCan.readSecurityTerms(r) else return null; ?#registerSecurity({ terms }) };
@@ -1020,6 +1200,9 @@ module {
       case (#collateral(ce)) { w.byte(0x65); wCollateralEvent(w, ce) };
       case (#limits(le)) { w.byte(0x66); wLimitEvent(w, le) };
       case (#reconciliation(re)) { w.byte(0x67); wReconciliationEvent(w, re) };
+      case (#liquidity(le)) { w.byte(0x68); wLiquidityEvent(w, le) };
+      case (#feed(fe)) { w.byte(0x69); wFeedEvent(w, fe) };
+      case (#market(me)) { w.byte(0x6A); wMarketEvent(w, me) };
     }
   };
 
@@ -1071,6 +1254,9 @@ module {
       case 0x65 { let ?ce = rCollateralEvent(r) else return null; ?#collateral(ce) };
       case 0x66 { let ?le = rLimitEvent(r) else return null; ?#limits(le) };
       case 0x67 { let ?re = rReconciliationEvent(r) else return null; ?#reconciliation(re) };
+      case 0x68 { let ?le = rLiquidityEvent(r) else return null; ?#liquidity(le) };
+      case 0x69 { let ?fe = rFeedEvent(r) else return null; ?#feed(fe) };
+      case 0x6A { let ?me = rMarketEvent(r) else return null; ?#market(me) };
       case _ null;
     };
     switch (out) {

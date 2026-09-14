@@ -133,6 +133,20 @@ module {
       p("depot.statement.record", "depot", #create, #command("recordDepotStatement"), false, false),
       p("depot.break.resolve", "depot", #update, #command("resolveDepotBreak"), false, true),
       p("cash.break.resolve", "cash", #update, #command("resolveCashBreak"), false, true),
+      // ── liquidity: every factor and class the ratios read is governance ──
+      p("liquidity.factors", "liquidity", #update, #command("setLiquidityFactors"), false, true),
+      p("liquidity.instrument.classify", "liquidity", #update, #command("classifyInstrument"), false, true),
+      p("liquidity.counterparty.classify", "liquidity", #update, #command("classifyCounterparty"), false, true),
+      p("liquidity.capital.declare", "liquidity", #update, #command("declareCapital"), false, true),
+      // ── the feed: the declaration and the lift are governance; a figure is a connector's, under its own signature ──
+      p("feed.declare", "feed", #update, #command("declareFeed"), false, true),
+      p("feed.price.submit", "feed", #create, #command("submitPrice"), false, false),
+      p("feed.halt.lift", "feed", #update, #command("liftHalt"), false, true),
+      // ── the market: the declaration and a cycle are dual; an order is the trader's within the desk's standing ──
+      p("market.declare", "market", #update, #command("declareMarket"), false, true),
+      p("market.order.stage", "market", #create, #command("stageOrder"), false, false),
+      p("market.order.cancel", "market", #update, #command("cancelOrder"), false, false),
+      p("market.cycle.open", "market", #create, #command("openMarketCycle"), false, true),
       // ── treasury (Manticore's rows, verbatim) ──
       p("treasury.policy", "treasury", #update, #command("setTreasuryPolicy"), false, true),
       p("treasury.security.register", "treasury", #create, #command("registerSecurity"), false, true),
@@ -238,6 +252,17 @@ module {
       case (#recordDepotStatement(_)) "recordDepotStatement";
       case (#resolveDepotBreak(_)) "resolveDepotBreak";
       case (#resolveCashBreak(_)) "resolveCashBreak";
+      case (#setLiquidityFactors(_)) "setLiquidityFactors";
+      case (#classifyInstrument(_)) "classifyInstrument";
+      case (#classifyCounterparty(_)) "classifyCounterparty";
+      case (#declareCapital(_)) "declareCapital";
+      case (#declareFeed(_)) "declareFeed";
+      case (#submitPrice(_)) "submitPrice";
+      case (#liftHalt(_)) "liftHalt";
+      case (#declareMarket(_)) "declareMarket";
+      case (#stageOrder(_)) "stageOrder";
+      case (#cancelOrder(_)) "cancelOrder";
+      case (#openMarketCycle(_)) "openMarketCycle";
       case (#setTreasuryPolicy(_)) "setTreasuryPolicy";
       case (#registerSecurity(_)) "registerSecurity";
       case (#publishCurve(_)) "publishCurve";
@@ -271,6 +296,8 @@ module {
       "openCollateralSubstitution", "settleCollateralSubstitution", "settleCollateralInterest",
       "setLimitNode", "removeLimitNode", "amendCounterparty", "openRiskSweep",
       "setReconciliationPolicy", "recordNostroNotification", "recordDepotStatement", "resolveDepotBreak", "resolveCashBreak",
+      "setLiquidityFactors", "classifyInstrument", "classifyCounterparty", "declareCapital",
+      "declareFeed", "submitPrice", "liftHalt", "declareMarket", "stageOrder", "cancelOrder", "openMarketCycle",
       "setTreasuryPolicy", "registerSecurity", "publishCurve", "setTreasuryLimit", "registerNostro", "captureDeal", "confirmDeal", "amendDeal", "cancelDeal",
       "settleDealLeg", "markDeal", "recordNostroStatement", "resolveNostroBreak",
     ]
@@ -290,8 +317,23 @@ module {
       ("driveSettlement", "the next step of an instruction recorded through four eyes: the calls it makes are the instruction's, the outcome is Tachyon's, and the caller chooses nothing"),
       ("advanceRiskSweep", "one slice of a sweep opened under dual control: the rows walked are the next in order, the figures are the fold's, and the caller chooses nothing"),
       ("reconcileCash", "the desk's settlement cash account against the ledger declared for its currency: the intent is recorded before the call and the ledger's reply after it, and the caller chooses nothing"),
+      ("driveMarketCycle", "the next step of a cycle opened through four eyes: the staged orders handed to the engine, the clear advanced, the fills read back, each captured and instructed on the engine's own trade; every step is the cycle's own and the caller chooses nothing"),
     ]
   };
+
+  /// The reads that answer about the caller's own standing and nothing of the desk's: a stranger's reply from one
+  /// of these is empty or about the stranger, never about the desk.
+  public func selfOnlyReads() : [Text] { ["listBooks", "planMeter", "treasuryDealsByState", "treasuryDealsOfCounterparty", "callsOfCounterparty", "marketOrders"] };
+  /// The reads scoped to the caller's books: a stranger is refused with the book named. Every other query method
+  /// is public by design, since the desk's log is verifiable by anyone who holds its bytes, and the isolation suite
+  /// lists it for the record rather than waving it through.
+  public func scopedReads() : [Text] {
+    ["attribution", "attributionOfBook", "call", "callTerms", "callsOfBook", "counterpartyExposure", "loan", "loansOfBook", "markOf", "marketOrder",
+     "pendingSettlement", "positions", "repo", "reposOfBook", "treasuryConfirmation", "treasuryDeal", "treasuryDealTerms", "treasuryDealsOfBook",
+     "treasuryLimits", "treasuryLots", "treasuryPositions", "treasurySettlementInstruction"]
+  };
+  /// The desk's own wording of an authority refusal, beside the kernel's phrases.
+  public func authorityPhrases() : [Text] { ["NoGrant", "NoReadableBook", "OutsideBookScope", "AnonymousCaller", "NotEligible", "NotTheOperator", "NoRole", "not in scope"] };
 
   public func forCommand(c : T.Command) : ?AT.Permission { P.byCommand(catalogue(), commandName(c)) };
   public func byMethod(method : Text) : ?AT.Permission { P.byMethod(catalogue(), method) };

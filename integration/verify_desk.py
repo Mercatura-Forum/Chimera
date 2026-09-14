@@ -155,7 +155,7 @@ class Reader(V.Reader):
     def instruction(self):
         return {"family": self.FAMILIES[self.byte()], "deal": self.nat(), "leg": self.nat(), "cycle": self.nat(), "role": {1: "maker", 2: "taker"}[self.byte()], "counterparty": self.principal(),
                 "assetLedger": self.principal(), "assetAmount": self.nat(), "cashLedger": self.principal(), "cashAmount": self.nat(),
-                "tradeId": self.opt_nat(), "reference": self.text(), "documentHash": self.blob()}
+                "tradeId": self.opt_nat(), "reference": self.text(), "documentHash": self.blob(), "matched": self.bool()}
 
     def blobs(self):
         return [self.blob() for _ in range(self.nats_len())]
@@ -418,6 +418,107 @@ class Reader(V.Reader):
             return {"cashBreakAged": {"break": self.nat(), "ageDays": self.nat(), "day": self.nat()}}
         raise ValueError(f"unknown reconciliation event tag {t:#x}")
 
+    # ── the feed ──
+    HALTS = {1: "disagreement", 2: "stale"}
+
+    def feed(self):
+        isin = self.text()
+        sources = [{"id": self.text(), "publicKey": self.blob()} for _ in range(self.len16())]
+        return {"isin": isin, "sources": sources, "bandBps": self.nat(), "staleSeconds": self.nat()}
+
+    def figures(self):
+        return [{"source": self.text(), "priceMicro": self.nat(), "asOf": self.nat64()} for _ in range(self.len16())]
+
+    def feed_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"feedDeclared": {"feed": self.feed(), "day": self.nat()}}
+        if t == 0x02:
+            return {"priceSubmitted": {"isin": self.text(), "source": self.text(), "priceMicro": self.nat(), "asOf": self.nat64(), "signature": self.blob(), "day": self.nat()}}
+        if t == 0x03:
+            return {"priceAccepted": {"isin": self.text(), "priceMicro": self.nat(), "asOf": self.nat64(), "figures": self.figures(), "day": self.nat()}}
+        if t == 0x04:
+            return {"instrumentHalted": {"isin": self.text(), "reason": self.HALTS[self.byte()], "figures": self.figures(), "day": self.nat()}}
+        if t == 0x05:
+            return {"haltLifted": {"isin": self.text(), "day": self.nat()}}
+        raise ValueError(f"unknown feed event tag {t:#x}")
+
+    # ── the market ──
+    ORDER_SIDES = {1: "buy", 2: "sell"}
+    ACCOUNTING = {0: "amortisedCost", 1: "fvoci", 2: "fvtpl"}
+
+    def market(self):
+        m = {"isin": self.text(), "engine": self.principal(), "sharesLedger": self.principal(), "cashLedger": self.principal(), "currency": self.text(), "unitNominal": self.nat(), "deadlineSecs": self.nat()}
+        m["participants"] = [{"principal": self.principal(), "counterparty": self.t_counterparty()} for _ in range(self.len16())]
+        return m
+
+    def order_terms(self):
+        return {"book": self.text(), "isin": self.text(), "side": self.ORDER_SIDES[self.byte()], "units": self.nat(), "classification": self.ACCOUNTING[self.byte()], "cash": self.cash(), "reference": self.text()}
+
+    def market_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"marketDeclared": {"market": self.market(), "day": self.nat()}}
+        if t == 0x02:
+            return {"orderStaged": {"terms": self.order_terms(), "trader": self.principal(), "withinLimits": self.bool(), "approver": self.t_opt_principal(), "day": self.nat()}}
+        if t == 0x03:
+            return {"orderCancelled": {"order": self.nat(), "reason": self.text(), "day": self.nat()}}
+        if t == 0x04:
+            return {"cycleOpened": {"isin": self.text(), "referenceMicro": self.nat(), "referenceBlock": self.nat(), "orders": self.nats(), "day": self.nat()}}
+        if t == 0x05:
+            return {"orderSubmitted": {"cycle": self.nat(), "order": self.nat(), "engineOrder": self.nat(), "window": self.nat(), "limit": self.nat(), "day": self.nat()}}
+        if t == 0x06:
+            return {"orderRefused": {"cycle": self.nat(), "order": self.nat(), "reason": self.text(), "day": self.nat()}}
+        if t == 0x07:
+            return {"clearAdvanced": {"cycle": self.nat(), "window": self.nat(), "clearingPrice": self.opt_nat(), "targetVolume": self.nat(), "filled": self.nat(), "chunks": self.nat(), "complete": self.bool(), "day": self.nat()}}
+        if t == 0x08:
+            return {"filled": {"cycle": self.nat(), "order": self.nat(), "seq": self.nat(), "price": self.nat(), "units": self.nat(), "counterparty": self.principal(), "day": self.nat()}}
+        if t == 0x09:
+            return {"fillUnattributed": {"cycle": self.nat(), "seq": self.nat(), "counterparty": self.principal(), "day": self.nat()}}
+        if t == 0x0A:
+            return {"fillCaptured": {"cycle": self.nat(), "seq": self.nat(), "deal": self.nat(), "day": self.nat()}}
+        if t == 0x0B:
+            return {"fillInstructed": {"cycle": self.nat(), "seq": self.nat(), "deal": self.nat(), "instruction": self.nat(), "day": self.nat()}}
+        if t == 0x0C:
+            return {"fillTradeSet": {"cycle": self.nat(), "seq": self.nat(), "tradeId": self.nat(), "day": self.nat()}}
+        if t == 0x0D:
+            return {"fillsRead": {"cycle": self.nat(), "through": self.nat(), "fills": self.nat(), "complete": self.bool(), "day": self.nat()}}
+        if t == 0x10:
+            return {"orderWithdrawn": {"cycle": self.nat(), "order": self.nat(), "engineOrder": self.nat(), "day": self.nat()}}
+        if t == 0x0E:
+            return {"callRefused": {"cycle": self.nat(), "step": self.text(), "reason": self.text(), "day": self.nat()}}
+        if t == 0x0F:
+            return {"cycleClosed": {"cycle": self.nat(), "fills": self.nat(), "unfilled": self.nats(), "day": self.nat()}}
+        raise ValueError(f"unknown market event tag {t:#x}")
+
+    # ── liquidity ──
+    LEVELS = {1: "level1", 2: "level2A", 3: "level2B", 4: "none"}
+    CP_TYPES = {1: "retailStable", 2: "retailLessStable", 3: "smallBusiness", 4: "nonFinancialCorporate", 5: "sovereign", 6: "centralBank", 7: "financial", 8: "operational"}
+
+    def rates(self):
+        return [{"counterpartyType": self.CP_TYPES[self.byte()], "bps": self.nat()} for _ in range(self.len16())]
+
+    def levels(self):
+        return [{"level": self.LEVELS[self.byte()], "bps": self.nat()} for _ in range(self.len16())]
+
+    def factors(self):
+        return {"hqlaHaircuts": self.levels(), "level2CapBps": self.nat(), "level2BCapBps": self.nat(), "runoff": self.rates(), "inflow": self.rates(), "inflowCapBps": self.nat(),
+                "asfUnderSixMonths": self.rates(), "asfSixToTwelve": self.rates(), "asfOverYearBps": self.nat(),
+                "rsfHqla": self.levels(), "rsfUnderSixMonths": self.rates(), "rsfSixToTwelve": self.rates(), "rsfOverYear": self.rates(), "rsfDerivativesBps": self.nat(),
+                "largeExposureBps": self.nat(), "largeExposureReportBps": self.nat()}
+
+    def liquidity_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"factorsSet": {"factors": self.factors(), "day": self.nat()}}
+        if t == 0x02:
+            return {"instrumentClassified": {"isin": self.text(), "level": self.LEVELS[self.byte()], "day": self.nat()}}
+        if t == 0x03:
+            return {"counterpartyClassified": {"name": self.text(), "counterpartyType": self.CP_TYPES[self.byte()], "day": self.nat()}}
+        if t == 0x04:
+            return {"capitalDeclared": {"currency": self.text(), "amount": self.nat(), "day": self.nat()}}
+        raise ValueError(f"unknown liquidity event tag {t:#x}")
+
     def payer(self):
         return {1: "desk", 2: "counterparty"}[self.byte()]
 
@@ -654,6 +755,28 @@ class Reader(V.Reader):
             return {"resolveDepotBreak": {"break": self.nat(), "resolution": self.text(), "correction": self.opt_nat()}}
         if tag == 0xB4:
             return {"resolveCashBreak": {"break": self.nat(), "resolution": self.text(), "correction": self.opt_nat()}}
+        if tag == 0xC0:
+            return {"setLiquidityFactors": self.factors()}
+        if tag == 0xC1:
+            return {"classifyInstrument": {"isin": self.text(), "level": self.LEVELS[self.byte()]}}
+        if tag == 0xC2:
+            return {"classifyCounterparty": {"name": self.text(), "counterpartyType": self.CP_TYPES[self.byte()]}}
+        if tag == 0xC3:
+            return {"declareCapital": {"currency": self.text(), "amount": self.nat()}}
+        if tag == 0xD0:
+            return {"declareFeed": {"feed": self.feed()}}
+        if tag == 0xD1:
+            return {"submitPrice": {"submission": {"isin": self.text(), "source": self.text(), "priceMicro": self.nat(), "asOf": self.nat64(), "signature": self.blob()}}}
+        if tag == 0xD2:
+            return {"liftHalt": {"isin": self.text()}}
+        if tag == 0xD3:
+            return {"declareMarket": {"market": self.market()}}
+        if tag == 0xD4:
+            return {"stageOrder": {"terms": self.order_terms(), "approver": self.t_opt_principal()}}
+        if tag == 0xD5:
+            return {"cancelOrder": {"order": self.nat(), "reason": self.text()}}
+        if tag == 0xD6:
+            return {"openMarketCycle": {"isin": self.text(), "approver": self.t_opt_principal()}}
         raise ValueError(f"unknown command tag {tag:#x}")
 
     def proposed(self):
@@ -749,6 +872,12 @@ class Reader(V.Reader):
             return {"limits": self.limit_event()}
         if t == 0x67:
             return {"reconciliation": self.reconciliation_event()}
+        if t == 0x68:
+            return {"liquidity": self.liquidity_event()}
+        if t == 0x69:
+            return {"feed": self.feed_event()}
+        if t == 0x6A:
+            return {"market": self.market_event()}
         raise ValueError(f"unknown desk event tag {t:#x}")
 
     # ── lifted without change from Manticore's verify_bank.py at 9c0c30e ──
