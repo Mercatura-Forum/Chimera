@@ -13,6 +13,7 @@ import Freeze "mo:kernel/domain/Freeze";
 import TT "mo:manticore/TreasuryTypes";
 
 import CallT "../../src/CallTypes";
+import CuT "../../src/CustodyTypes";
 
 import T "../../src/DeskTypes";
 import Can "../../src/DeskCanonical";
@@ -38,8 +39,20 @@ module {
 
   public let callTerms : CallT.Terms = { placement = true; currency = "USD"; principal = 750_000_00; rateBps = 430; dayCount = #a003_Act360; noticeDays = 7; interestEveryDays = 30; capitalise = false; cash = nostro; start = 20670 };
 
+  public let depot : CuT.Depot = { id = "DEPOT-CITI"; custodian = citi; place = "MCSD"; safekeepingAccount = "SAFE-001" };
+  public let announcement : CuT.Announcement = { isin = "EG0000012345"; kind = #coupon({ perHundredMicro = 6_000_000 }); recordDate = 20700; exDate = 20699; paymentDate = 20702; source = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob };
+
   public func samples() : [Freeze.Sample<T.Command>] {
     [
+      { family = "setCustodyPolicy"; command = #setCustodyPolicy({ entitlementBasis = #contractual }) },
+      { family = "extendInstrument"; command = #extendInstrument({ extension = { isin = "EG0000012345"; lei = "5493001KJTIIGC8Y1R12"; classification = #sovereign; market = "EGX"; settlementCycleDays = 2; quotation = #pricePer100; minDenomination = 100_00 } }) },
+      { family = "openDepot"; command = #openDepot({ depot }) },
+      { family = "setBookDepot"; command = #setBookDepot({ book = "BR01"; depot = "DEPOT-CITI" }) },
+      { family = "assignDealDepot"; command = #assignDealDepot({ deal = 40; depot = "DEPOT-CITI" }) },
+      { family = "transferDepot"; command = #transferDepot({ lot = 40; from = "DEPOT-CITI"; to = "DEPOT-HSBC"; nominal = 1_000_000_00; reference = "fop-1" }) },
+      { family = "announceCorporateAction"; command = #announceCorporateAction({ announcement }) },
+      { family = "cancelCorporateAction"; command = #cancelCorporateAction({ action = 70; reason = "withdrawn by the issuer" }) },
+      { family = "processCorporateAction"; command = #processCorporateAction({ action = 70; postingDate = 20702; valueDate = 20702; period = "2026-08"; narration = "coupon" }) },
       { family = "revaluePositions"; command = #revaluePositions({ period = "2026-08"; postingDate = 20700; valueDate = 20700; narration = "month end" }) },
       { family = "openCall"; command = #openCall({ book = "BR01"; counterparty = citi; terms = callTerms; reference = "call-1"; approver = null }) },
       { family = "resetCallRate"; command = #resetCallRate({ call = 50; rateBps = 450; postingDate = 20680; valueDate = 20680; period = "2026-08"; narration = "reset" }) },
@@ -134,6 +147,19 @@ module {
       #call(#accrued({ call = 50; interest = 6_250; day = 20691 })),
       #call(#interestSettled({ call = 50; amount = 150_000; capitalised = false; day = 20700 })),
       #call(#repaid({ call = 50; principal = 500_000_00; interest = 41_667; day = 20697 })),
+      #custody(#policySet({ entitlementBasis = #actual })),
+      #custody(#instrumentExtended({ extension = { isin = "EG0000012345"; lei = ""; classification = #corporate; market = "OTC"; settlementCycleDays = 1; quotation = #yield; minDenomination = 1_00 }; day = 20670 })),
+      #custody(#depotOpened({ depot; day = 20670 })),
+      #custody(#bookDepotSet({ book = "BR01"; depot = "DEPOT-CITI"; day = 20670 })),
+      #custody(#dealDepotAssigned({ deal = 40; depot = "DEPOT-CITI"; day = 20670 })),
+      #custody(#transferred({ lot = 40; from = "DEPOT-CITI"; to = "DEPOT-HSBC"; nominal = 1_000_000_00; reference = "fop-1"; day = 20680 })),
+      #custody(#announced({ announcement; day = 20690 })),
+      #custody(#cancelled({ action = 70; reason = "withdrawn"; day = 20691 })),
+      #custody(#entitlementRecorded({ action = 70; lot = 40; depot = "DEPOT-CITI"; nominal = 1_000_000_00; amount = 60_000_00; basis = #contractual; day = 20700 })),
+      #custody(#entitled({ action = 70; lots = 1; total = 60_000_00; day = 20700 })),
+      #custody(#entitlementPaid({ action = 70; lot = 40; amount = 60_000_00; nominal = 0; realised = -3; day = 20702 })),
+      #custody(#paid({ action = 70; lots = 1; total = 60_000_00; day = 20702 })),
+      #custody(#entitlementClaimed({ action = 70; lot = 40; amount = 60_000_00; accrued = 59_800_00; day = 20701 })),
     ]
   };
 }

@@ -24,6 +24,7 @@ import Fx "mo:manticore/Fx";
 import AlT "mo:manticore/AlertTypes";
 
 import CallT "CallTypes";
+import CuT "CustodyTypes";
 
 module {
 
@@ -92,6 +93,16 @@ module {
     #adjustCallBalance : { call : CallT.CallId; delta : Int; approver : ?Principal; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
     #serveCallNotice : { call : CallT.CallId };
     #settleCall : { call : CallT.CallId; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    // ── securities services: the instrument master extended, depots, corporate actions ──
+    #setCustodyPolicy : CuT.Policy;
+    #extendInstrument : { extension : CuT.Extension };
+    #openDepot : { depot : CuT.Depot };
+    #setBookDepot : { book : BookId; depot : Text };
+    #assignDealDepot : { deal : TT.DealId; depot : Text };
+    #transferDepot : { lot : TT.DealId; from : Text; to : Text; nominal : Nat; reference : Text };
+    #announceCorporateAction : { announcement : CuT.Announcement };
+    #cancelCorporateAction : { action : CuT.ActionId; reason : Text };
+    #processCorporateAction : { action : CuT.ActionId; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
     // ── treasury: the thirteen commands of Manticore's treasury domain, their bodies Manticore's ──
     #setTreasuryPolicy : TT.Policy;
     #registerSecurity : { terms : TT.SecurityTerms };
@@ -157,6 +168,7 @@ module {
     #alert : AlT.AlertEvent;
     #treasury : TT.TreasuryEvent;
     #call : CallT.Event;
+    #custody : CuT.Event;
   };
 
   public type BatchError = {
@@ -226,6 +238,7 @@ module {
     #AlertError : { error : AlT.AlertError };
     #TreasuryError : { error : TT.TreasuryError };
     #CallError : { error : CallT.Error };
+    #CustodyError : { error : CuT.Error };
     #MissingRate : { currency : Text; asOf : Day };
   };
 
@@ -319,6 +332,7 @@ module {
       case (#alert(_)) "alert";
       case (#treasury(_)) "treasury";
       case (#call(_)) "call";
+      case (#custody(_)) "custody";
     }
   };
 }

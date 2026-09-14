@@ -73,6 +73,16 @@ module {
       p("call.balance.adjust", "call", #update, #command("adjustCallBalance"), true, true),
       p("call.notice.serve", "call", #update, #command("serveCallNotice"), false, true),
       p("call.settle", "call", #update, #command("settleCall"), true, true),
+      // ── securities services: the master, the depots and the actions are dual acts; the processing moves money ──
+      p("custody.policy", "custody", #update, #command("setCustodyPolicy"), false, true),
+      p("instrument.extend", "instrument", #update, #command("extendInstrument"), false, true),
+      p("depot.open", "depot", #create, #command("openDepot"), false, true),
+      p("depot.book.update", "depot", #update, #command("setBookDepot"), false, true),
+      p("depot.deal.assign", "depot", #update, #command("assignDealDepot"), false, true),
+      p("depot.transfer", "depot", #update, #command("transferDepot"), true, true),
+      p("corporate.action.announce", "corporate", #create, #command("announceCorporateAction"), false, true),
+      p("corporate.action.cancel", "corporate", #reverse, #command("cancelCorporateAction"), false, true),
+      p("corporate.action.process", "corporate", #update, #command("processCorporateAction"), true, true),
       // ── treasury (Manticore's rows, verbatim) ──
       p("treasury.policy", "treasury", #update, #command("setTreasuryPolicy"), false, true),
       p("treasury.security.register", "treasury", #create, #command("registerSecurity"), false, true),
@@ -125,6 +135,15 @@ module {
       case (#adjustCallBalance(_)) "adjustCallBalance";
       case (#serveCallNotice(_)) "serveCallNotice";
       case (#settleCall(_)) "settleCall";
+      case (#setCustodyPolicy(_)) "setCustodyPolicy";
+      case (#extendInstrument(_)) "extendInstrument";
+      case (#openDepot(_)) "openDepot";
+      case (#setBookDepot(_)) "setBookDepot";
+      case (#assignDealDepot(_)) "assignDealDepot";
+      case (#transferDepot(_)) "transferDepot";
+      case (#announceCorporateAction(_)) "announceCorporateAction";
+      case (#cancelCorporateAction(_)) "cancelCorporateAction";
+      case (#processCorporateAction(_)) "processCorporateAction";
       case (#setTreasuryPolicy(_)) "setTreasuryPolicy";
       case (#registerSecurity(_)) "registerSecurity";
       case (#publishCurve(_)) "publishCurve";
@@ -150,6 +169,7 @@ module {
       "setFunctionalCurrency", "setFxPair", "setFxRate", "recordRateFixing",
       "openEndOfDay", "setRetryPolicy", "resolveEndOfDayFailure", "clearAlert",
       "revaluePositions", "openCall", "resetCallRate", "adjustCallBalance", "serveCallNotice", "settleCall",
+      "setCustodyPolicy", "extendInstrument", "openDepot", "setBookDepot", "assignDealDepot", "transferDepot", "announceCorporateAction", "cancelCorporateAction", "processCorporateAction",
       "setTreasuryPolicy", "registerSecurity", "publishCurve", "setTreasuryLimit", "registerNostro", "captureDeal", "confirmDeal", "amendDeal", "cancelDeal",
       "settleDealLeg", "markDeal", "recordNostroStatement", "resolveNostroBreak",
     ]
@@ -164,6 +184,8 @@ module {
     [
       ("advanceEndOfDay", "the plan was fixed at the run's opening and is checked against its hash; a caller chooses nothing, and the blocks are attributed to the contract"),
       ("expireProposals", "expiry is a fact of the clock; the block is attributed to the contract and the caller chooses nothing"),
+      ("beginReplay", "a verification: the fold of the logs recomputed into the replay's own arena, which writes nothing the desk reads; the caller chooses nothing"),
+      ("advanceReplay", "a verification step over the recorded blocks in order; the caller chooses nothing but how many"),
     ]
   };
 

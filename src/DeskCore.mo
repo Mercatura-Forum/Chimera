@@ -49,6 +49,8 @@ import Fixings "Fixings";
 import Eod "EndOfDay";
 import CallT "CallTypes";
 import CallCore "CallCore";
+import CuT "CustodyTypes";
+import CustodyCore "CustodyCore";
 import Calendar "mo:journal/Calendar";
 
 module {
@@ -66,10 +68,12 @@ module {
     eod : Eod.State;
     treasury : TreasuryCore.State;
     calls : CallCore.State;
+    custody : CustodyCore.State;
   };
 
-  public func newState(installer : Principal) : State {
-    let arena = RI.newArena();
+  public func newState(installer : Principal) : State { newStateIn(installer, RI.newArena()) };
+  /// A state whose indexes live in a given arena: the live state's own, or the replay's, whose pages are reused.
+  public func newStateIn(installer : Principal, arena : RI.Arena) : State {
     {
       arena; var height = 0;
       authority = Auth.newState(arena, installer);
@@ -79,6 +83,7 @@ module {
       eod = Eod.newState();
       treasury = TreasuryCore.newState(arena);
       calls = CallCore.newState(arena);
+      custody = CustodyCore.newState(arena);
     }
   };
 
@@ -119,6 +124,7 @@ module {
       case (#resetCallRate(x)) ?x.postingDate;
       case (#adjustCallBalance(x)) ?x.postingDate;
       case (#settleCall(x)) ?x.postingDate;
+      case (#processCorporateAction(x)) ?x.postingDate;
       case (_) null;
     }
   };
@@ -140,6 +146,9 @@ module {
       case (#adjustCallBalance(x)) bookOfCall(s, x.call);
       case (#serveCallNotice(x)) bookOfCall(s, x.call);
       case (#settleCall(x)) bookOfCall(s, x.call);
+      case (#setBookDepot(x)) ?x.book;
+      case (#assignDealDepot(x)) bookOfDeal(s, x.deal);
+      case (#transferDepot(x)) bookOfDeal(s, x.lot);
       case (_) null;
     }
   };
@@ -173,6 +182,7 @@ module {
       case (#adjustCallBalance(x)) { switch (CallCore.row(s.calls, x.call)) { case (?r) [(r.currency, Int.abs(x.delta))]; case null [] } };
       case (#resetCallRate(x)) balanceOfCall(s, x.call);
       case (#settleCall(x)) balanceOfCall(s, x.call);
+      case (#transferDepot(x)) { switch (TreasuryCore.row(s.treasury, x.lot)) { case (?r) [(treasuryRowCurrency(s, r), x.nominal)]; case null [] } };
       case (_) [];
     }
   };
@@ -295,6 +305,98 @@ module {
     switch (postLegs(js, journalCaller, now, purpose, parts, legs, postingDate, valueDate, period, narration)) {
       case (#err(e)) #err(e);
       case (#ok(plan)) #ok({ event = ?#call(ev); extra = []; journal = plan.journal });
+    }
+  };
+
+  func custodyErr<X>(e : CuT.Error) : Res<X> { #err(#CustodyError({ error = e })) };
+  func custodyPlan(r : Result.Result<CuT.Event, CuT.Error>) : Res<Plan> { switch (r) { case (#err(e)) custodyErr(e); case (#ok(ev)) only(#custody(ev)) } };
+  func isinOfLot(s : State) : TT.DealId -> Text { func(lot : Nat) : Text { switch (TreasuryCore.row(s.treasury, lot)) { case (?r) r.isin; case null "" } } };
+  /// The terms' cash account of a security lot, from its capture or last amendment.
+  func lotCash(bb : Blocks, r : TreasuryCore.DealRow) : ?TT.CashAccount { switch (treasuryKindOf(bb, r)) { case (?#security(t)) ?t.cash; case (_) null } };
+  /// Every open purchase lot of an instrument across the books, with its depot: what an entitlement is computed over.
+  func lotsOfIsin(s : State, isin : Text) : [(TreasuryCore.DealRow, ?Text)] {
+    let out = List.empty<(TreasuryCore.DealRow, ?Text)>();
+    for (b in Auth.listBooks(s.authority).vals()) {
+      for (r in TreasuryCore.dealsOfBook(s.treasury, b.id).vals()) {
+        if (r.kind == 4 and (r.flags & TreasuryCore.F_BUY) != 0 and TreasuryCore.isOpen(r) and Text.equal(r.isin, isin)) List.add(out, (r, CustodyCore.dealDepotOf(s.custody, r.id)));
+      };
+    };
+    List.toArray(out)
+  };
+  /// The sale's lots against its delivering depot, before Manticore's planner: a lot the depot does not hold cannot
+  /// be delivered from it.
+  func saleDepotCheck(s : State, r : TreasuryCore.DealRow, kind : TT.DealKind, leg : Nat) : ?T.Error {
+    switch (kind) {
+      case (#security(t)) {
+        if (t.direction != #sell or leg != 0) return null;
+        let ?p = TreasuryCore.policy(s.treasury) else return null;
+        switch (CustodyCore.checkSaleDepot(s.custody, s.treasury, r, t, p.lotMethod)) { case (?e) ?#CustodyError({ error = e }); case null null }
+      };
+      case (_) null;
+    }
+  };
+  /// The coupon claim due on a lot: an entitled coupon action of its instrument whose claim day has come and whose
+  /// entitlement on the lot is not yet claimed.
+  func claimDueFor(s : State, r : TreasuryCore.DealRow, day : Nat) : ?(CustodyCore.ActionRow, CustodyCore.EntitlementRow) {
+    let ?sec = TreasuryCore.security(s.treasury, r.isin) else return null;
+    for (ar in CustodyCore.actionsOf(s.custody, r.isin).vals()) {
+      if (ar.kind == 1 and ar.state == #entitled and day >= CustodyCore.claimDay(sec, ar)) {
+        switch (CustodyCore.entitlement(s.custody, ar.id, r.id)) { case (?e) { if (not e.claimed) return ?(ar, e) }; case null {} };
+      };
+    };
+    null
+  };
+  /// A corporate action's acts due on a day, one at a time: the entitlement at the record date, then each lot's
+  /// payment at the payment date, then the action closed as paid.
+  public type ActionAct = { events : [T.Event]; legs : [JT.Leg]; lot : ?TT.DealId; step : Text };
+  func nextActionAct(s : State, bb : Blocks, id : CuT.ActionId, day : Nat) : Res<?ActionAct> {
+    let ?r = CustodyCore.action(s.custody, id) else return custodyErr(#UnknownAction({ action = id }));
+    switch (r.state) {
+      case (#announced) {
+        if (day < r.recordDate) return #ok(null);
+        switch (CustodyCore.planEntitle(s.custody, r, func() { lotsOfIsin(s, r.isin) }, day)) {
+          case (#err(e)) custodyErr(e);
+          case (#ok(evs)) #ok(?{ events = Array.map<CuT.Event, T.Event>(evs, func(e) { #custody(e) }); legs = []; lot = null; step = "entitle" });
+        }
+      };
+      case (#entitled) {
+        let ?p = TreasuryCore.policy(s.treasury) else return #err(#TreasuryError({ error = #NoPolicy }));
+        let ?sec = TreasuryCore.security(s.treasury, r.isin) else return custodyErr(#UnknownInstrument({ isin = r.isin }));
+        let entitlements = CustodyCore.entitlementsOf(s.custody, id);
+        // a coupon is claimed on its claim day, lot by lot, before anything is paid
+        if (r.kind == 1 and day >= CustodyCore.claimDay(sec, r)) {
+          for (e in entitlements.vals()) {
+            if (not e.claimed) {
+              let ?lot = TreasuryCore.row(s.treasury, e.lot) else return custodyErr(#LotNotIn({ lot = e.lot; state = "unknown" }));
+              switch (CustodyCore.planClaim(p, r, e, lot, sec.currency, day)) {
+                case (#err(err)) return custodyErr(err);
+                case (#ok(claim)) {
+                  let evs = switch (claim.treasury) { case (?te) [#treasury(te), #custody(claim.ev)]; case null [#custody(claim.ev)] };
+                  return #ok(?{ events = evs; legs = claim.legs; lot = ?e.lot; step = "claim" });
+                };
+              };
+            };
+          };
+        };
+        if (day < r.paymentDate) return #ok(null);
+        var total = 0; var lots = 0;
+        for (e in entitlements.vals()) {
+          lots += 1; total += e.amount;
+          if (not e.paid) {
+            let ?lot = TreasuryCore.row(s.treasury, e.lot) else return custodyErr(#LotNotIn({ lot = e.lot; state = "unknown" }));
+            let ?cash = lotCash(bb, lot) else return custodyErr(#LotNotIn({ lot = e.lot; state = "terms not in the log" }));
+            switch (CustodyCore.planPay(s.custody, p, r, e, lot, cash, sec.currency, day)) {
+              case (#err(err)) return custodyErr(err);
+              case (#ok(pay)) {
+                let evs = switch (pay.treasury) { case (?te) [#treasury(te), #custody(pay.ev)]; case null [#custody(pay.ev)] };
+                return #ok(?{ events = evs; legs = pay.legs; lot = ?e.lot; step = "pay" });
+              };
+            };
+          };
+        };
+        #ok(?{ events = [#custody(#paid({ action = id; lots; total; day }))]; legs = []; lot = null; step = "close" })
+      };
+      case (_) #ok(null);
     }
   };
 
@@ -519,6 +621,43 @@ module {
           case (#ok(?ev)) callPost(js, journalCaller, now, p, r, cs, ev, "call-settle", [authId, Nat.toText(x.call), Nat.toText(x.valueDate), callPart(ev)], x.postingDate, x.valueDate, x.period, x.narration);
         }
       };
+      // ── securities services ──
+      case (#setCustodyPolicy(p)) custodyPlan(CustodyCore.planPolicy(p));
+      case (#extendInstrument(x)) custodyPlan(CustodyCore.planExtend(s.custody, s.treasury, x.extension, today));
+      case (#openDepot(x)) custodyPlan(CustodyCore.planOpenDepot(s.custody, x.depot, today));
+      case (#setBookDepot(x)) {
+        switch (Auth.requireOpenBook(a, x.book)) { case (?e) return #err(e); case null {} };
+        custodyPlan(CustodyCore.planSetBookDepot(s.custody, x.book, x.depot, today))
+      };
+      case (#assignDealDepot(x)) custodyPlan(CustodyCore.planAssignDealDepot(s.custody, s.treasury, x.deal, x.depot, today));
+      case (#transferDepot(x)) custodyPlan(CustodyCore.planTransfer(s.custody, x.lot, x.from, x.to, x.nominal, x.reference, today));
+      case (#announceCorporateAction(x)) custodyPlan(CustodyCore.planAnnounce(s.custody, s.treasury, x.announcement, today));
+      case (#cancelCorporateAction(x)) custodyPlan(CustodyCore.planCancel(s.custody, x.action, x.reason, today));
+      case (#processCorporateAction(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        switch (nextActionAct(s, bb, x.action, x.valueDate)) {
+          case (#err(e)) #err(e);
+          case (#ok(null)) {
+            // nothing due by hand is a typed refusal: the day it falls due, or the state it is in
+            let ?r = CustodyCore.action(s.custody, x.action) else return custodyErr(#UnknownAction({ action = x.action }));
+            switch (r.state) {
+              case (#announced) custodyErr(#NotDue({ action = x.action; due = r.recordDate; day = x.valueDate }));
+              case (#entitled) custodyErr(#NotDue({ action = x.action; due = r.paymentDate; day = x.valueDate }));
+              case (_) custodyErr(#ActionNotIn({ action = x.action; state = CuT.actionStateText(r.state); wanted = "announced or entitled" }));
+            }
+          };
+          case (#ok(?act)) {
+            let first = act.events[0];
+            let rest = Array.tabulate<T.Event>(act.events.size() - 1, func(i) { act.events[i + 1] });
+            if (act.legs.size() == 0) return #ok({ event = ?first; extra = rest; journal = [] });
+            let lotText = switch (act.lot) { case (?l) Nat.toText(l); case null "" };
+            switch (postLegs(js, journalCaller, now, "corporate-action", [authId, Nat.toText(x.action), act.step, lotText, Nat.toText(x.valueDate)], act.legs, x.postingDate, x.valueDate, x.period, x.narration)) {
+              case (#err(e)) #err(e);
+              case (#ok(plan)) #ok({ event = ?first; extra = rest; journal = plan.journal });
+            }
+          };
+        }
+      };
       // ── treasury: Manticore's planners with the desk's context ──
       case (#setTreasuryPolicy(pol)) {
         for (code in TreasuryCore.accountsOf(pol).vals()) { switch (JCore.getAccount(js, code)) { case null return #err(#UnknownAccount({ role = "treasury policy"; account = code })); case (?_) {} } };
@@ -550,9 +689,11 @@ module {
         let treasuryOnly = switch (TreasuryCore.limitOf(s.treasury, x.book, #counterpartyExposure, dealCcy, x.counterparty.name)) { case (?l) treasuryExposure(s, x.book, x.counterparty.name, dealCcy) + dealAmount > l; case null false };
         let combined = if (dealAmount == 0) [] else { switch (combinedLimitEvents(s, x.book, x.counterparty, dealCcy, dealAmount, treasuryOnly, s.height, x.approver, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs } };
         // the trader is whose act it is; the approver on the command is the desk head who accepted a breach
+        // a security deal is held in the book's depot when the book declares one
+        let depotAssigned : [T.Event] = switch (x.kind, CustodyCore.bookDepotOf(s.custody, x.book)) { case (#security(_), ?d) [#custody(#dealDepotAssigned({ deal = s.height; depot = d; day = today }))]; case (_) [] };
         switch (TreasuryCore.planCapture(s.treasury, s.height, x.book, x.counterparty, x.kind, x.reference, authority, today, x.approver, ctx, treasuryTerms(bb))) {
           case (#err(e)) treasuryErr(e);
-          case (#ok(r)) #ok({ event = ?#treasury(r.ev); extra = Array.concat<T.Event>(Array.map<TT.TreasuryEvent, T.Event>(r.extras, func(e) { #treasury(e) }), combined); journal = [] });
+          case (#ok(r)) #ok({ event = ?#treasury(r.ev); extra = Array.concat<T.Event>(Array.concat<T.Event>(Array.map<TT.TreasuryEvent, T.Event>(r.extras, func(e) { #treasury(e) }), combined), depotAssigned); journal = [] });
         }
       };
       case (#confirmDeal(x)) {
@@ -581,6 +722,7 @@ module {
         switch (requireNoOpenRun(s, r.book, x.valueDate)) { case (?e) return #err(e); case null {} };
         let kind = switch (treasuryKind(bb, r)) { case (#err(e)) return #err(e); case (#ok(k)) k };
         let ctx = switch (treasuryCtx(s)) { case (#err(e)) return #err(e); case (#ok(c)) c };
+        switch (saleDepotCheck(s, r, kind, x.leg)) { case (?e) return #err(e); case null {} };
         switch (TreasuryCore.planSettleLeg(s.treasury, r, kind, x.leg, x.valueDate, ctx)) {
           case (#err(e)) treasuryErr(e);
           case (#ok(act)) treasuryPost(js, journalCaller, now, "treasury-settle", [authId, Nat.toText(x.deal), Nat.toText(x.leg)], act, x.postingDate, x.valueDate, x.period, x.narration);
@@ -807,8 +949,29 @@ module {
       acc.examined += 1;
       let ?kind = treasuryKindOf(bb, r0) else { fail(acc, index, item.job, book, r0.id, "the deal's terms are not in the log"); continue };
       func current() : ?TreasuryCore.DealRow { TreasuryCore.row(s.treasury, r0.id) };
+      // the instrument's own coupon, unless an announced coupon covers the date: then the announced coupon's claim
+      // stands in the coupon's own slot, before the accrual, so the lot's accrual is cleared into the claim and
+      // never reversed
       switch (current()) {
-        case (?r) { switch (TreasuryCore.planCoupon(s.treasury, r, kind, day)) { case (#ok(?a)) ignore post("treasury-coupon", r.id, "c", a, "coupon"); case (#ok(null)) {}; case (#err(e)) fail(acc, index, item.job, book, r.id, debug_show e) } };
+        case (?r) {
+          if (r.kind == 4 and CustodyCore.announcedCouponCovers(s.custody, r.isin, day)) {
+            switch (claimDueFor(s, r, day), TreasuryCore.policy(s.treasury), TreasuryCore.security(s.treasury, r.isin)) {
+              case (?(ar, e), ?p, ?sec) {
+                switch (CustodyCore.planClaim(p, ar, e, r, sec.currency, day)) {
+                  case (#ok(claim)) {
+                    let te = switch (claim.treasury) { case (?te) te; case null #couponPaid({ deal = r.id; amount = e.amount; day }) };
+                    let a : TreasuryCore.Act = { ev = te; legs = claim.legs; extras = [] };
+                    if (post("corporate-action", ar.id, "claim/" # Nat.toText(r.id), a, "corporate action " # Nat.toText(ar.id) # " claim")) record(acc, #custody(claim.ev));
+                  };
+                  case (#err(err)) fail(acc, index, item.job, book, r.id, debug_show err);
+                };
+              };
+              case (_) {};
+            };
+          } else {
+            switch (TreasuryCore.planCoupon(s.treasury, r, kind, day)) { case (#ok(?a)) ignore post("treasury-coupon", r.id, "c", a, "coupon"); case (#ok(null)) {}; case (#err(e)) fail(acc, index, item.job, book, r.id, debug_show e) };
+          };
+        };
         case null {};
       };
       switch (current()) {
@@ -828,6 +991,7 @@ module {
         switch (TreasuryCore.legDue(kind, leg, secMaturity)) {
           case (?due) {
             if (due > day) break legs;
+            switch (saleDepotCheck(s, r, kind, leg)) { case (?e) { fail(acc, index, item.job, book, r.id, debug_show e); break legs }; case null {} };
             switch (TreasuryCore.planSettleLeg(s.treasury, r, kind, leg, day, ctx)) {
               case (#ok(a)) { if (not post("treasury-settle", r.id, Nat.toText(leg), a, "leg " # Nat.toText(leg) # " settled")) break legs };
               case (#err(e)) { fail(acc, index, item.job, book, r.id, debug_show e); break legs };
@@ -889,10 +1053,39 @@ module {
     };
   };
 
+  /// The custody job: every corporate action due on the day, one act at a time, each folded before the next is
+  /// asked for: the entitlement at the record date, a lot's payment at the payment date, the action closed as paid.
+  func jobCustody(s : State, bb : Blocks, js : JCore.State, jb : JCore.Blocks, journalCaller : Principal, now : Nat64, acc : ChunkAcc, item : Batch.PlanItem, index : Nat, day : Nat, period : Text, book : Text, onlyAction : ?Nat) {
+    let due = Array.concat<CustodyCore.ActionRow>(CustodyCore.actionsInState(s.custody, #announced), CustodyCore.actionsInState(s.custody, #entitled));
+    for (r0 in due.vals()) {
+      let mine = switch (onlyAction) { case null true; case (?e) e == r0.id };
+      if (not mine) continue;
+      acc.examined += 1;
+      var steps = 0;
+      label acts while (steps < 256) {
+        steps += 1;
+        switch (nextActionAct(s, bb, r0.id, day)) {
+          case (#ok(null)) break acts;
+          case (#err(e)) { fail(acc, index, item.job, book, r0.id, debug_show e); break acts };
+          case (#ok(?act)) {
+            if (act.legs.size() > 0) {
+              if (not Posting.balances(act.legs)) { fail(acc, index, item.job, book, r0.id, "corporate action: the legs do not balance"); break acts };
+              let lotText = switch (act.lot) { case (?l) Nat.toText(l); case null "" };
+              let input : JT.PostingInput = { idempotencyKey = Posting.key("corporate-action", [Nat.toText(r0.id), act.step # "/" # lotText, Nat.toText(day)]); postingDate = day; valueDate = day; period; legs = act.legs; sourceRef = { kind = "corporate-action"; id = Nat.toText(r0.id) # "/" # act.step # "/" # lotText # "/" # Nat.toText(day) }; narration = "corporate action " # Nat.toText(r0.id) # " " # act.step; correctionOf = null };
+              switch (batchPost(js, jb, journalCaller, now, acc, input)) { case (?why) { fail(acc, index, item.job, book, r0.id, why); break acts }; case null {} };
+            };
+            for (ev in act.events.vals()) record(acc, ev);
+          };
+        };
+      };
+    };
+  };
+
   func runItem(s : State, bb : Blocks, js : JCore.State, jb : JCore.Blocks, journalCaller : Principal, now : Nat64, acc : ChunkAcc, run : Eod.Run, item : Batch.PlanItem, index : Nat, day : Nat, onlyDeal : ?Nat) {
     let ?period = periodForDay(js, day) else { acc.examined += 1; fail(acc, index, item.job, run.book, 0, "no open period contains day " # Nat.toText(day)); return };
     if (Text.equal(item.job.name, Eod.JOB_TREASURY.name)) jobTreasury(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
     else if (Text.equal(item.job.name, Eod.JOB_CALLS.name)) jobCalls(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
+    else if (Text.equal(item.job.name, Eod.JOB_CUSTODY.name)) jobCustody(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
     else fail(acc, index, item.job, run.book, 0, "unknown job " # item.job.name);
   };
 
@@ -961,8 +1154,9 @@ module {
       case (#fixingRecorded(f)) Fixings.fold(s.fixings, f);
       case (#eod(e)) Eod.fold(s.eod, block.index, e);
       case (#alert(ae)) AlertCore.apply(s.alerts, block.index, ae);
-      case (#treasury(te)) TreasuryCore.fold(s.treasury, block.index, te);
+      case (#treasury(te)) { TreasuryCore.fold(s.treasury, block.index, te); CustodyCore.observeTreasury(s.custody, te, func(id : Nat) : ?TreasuryCore.DealRow { TreasuryCore.row(s.treasury, id) }) };
       case (#call(ce)) CallCore.fold(s.calls, block.index, ce);
+      case (#custody(ce)) CustodyCore.fold(s.custody, block.index, ce, isinOfLot(s));
       case (_) Auth.apply(s.authority, block);
     };
     if (block.index + 1 > s.height) s.height := block.index + 1;
@@ -991,6 +1185,42 @@ module {
     s
   };
 
+  /// A replay in steps, for a log too long to fold inside one message: the target heights are fixed when it
+  /// begins, the desk blocks are applied a page at a time in order, and the journal is indexed to each mark as the
+  /// one-shot replay does. Complete when the desk log has been applied to its target and the journal indexed to its
+  /// own.
+  public type Replay = { state : State; var next : Nat; var journalNext : Nat; deskTarget : Nat; journalTarget : Nat; var complete : Bool };
+  public func replayBegin(installer : Principal, arena : RI.Arena, deskTarget : Nat, journalTarget : Nat) : Replay {
+    { state = newStateIn(installer, arena); var next = 0; var journalNext = 0; deskTarget; journalTarget; var complete = false }
+  };
+  /// Applies the blocks given, which must start at the replay's next height and not pass its target; `journalPage`
+  /// reads the journal's posted blocks from a height, at most a page at a time. Returns what was applied.
+  public func replayStep(r : Replay, blocks : [Block], journalPage : (Nat, Nat) -> [JT.Block]) : Nat {
+    if (r.complete) return 0;
+    func indexThrough(height : Nat) {
+      let to = Nat.min(height, r.journalTarget);
+      while (r.journalNext < to) {
+        let page = journalPage(r.journalNext, to - r.journalNext);
+        if (page.size() == 0) Runtime.trap("DeskCore.replayStep: the journal returned an empty page below its height");
+        for (jb in page.vals()) {
+          if (jb.index != r.journalNext) Runtime.trap("DeskCore.replayStep: journal block " # Nat.toText(jb.index) # " out of order at " # Nat.toText(r.journalNext));
+          switch (jb.event) { case (#posted(p)) ignore TreasuryCore.indexJournalLegs(r.state.treasury, jb.index, p.valueDate, p.legs, p.sourceRef.id); case (_) {} };
+          r.journalNext += 1;
+        };
+      };
+    };
+    var applied = 0;
+    for (b in blocks.vals()) {
+      if (r.next >= r.deskTarget) break;
+      if (b.index != r.next or b.index != r.state.height) Runtime.trap("DeskCore.replayStep: block " # Nat.toText(b.index) # " out of order at height " # Nat.toText(r.next));
+      switch (b.event) { case (#journalMark(x)) indexThrough(x.height); case (_) {} };
+      apply(r.state, b);
+      r.next += 1; applied += 1;
+    };
+    if (r.next == r.deskTarget) { indexThrough(r.journalTarget); r.complete := true };
+    applied
+  };
+
   public func fingerprintInto(w : JC.Writer, s : State) {
     w.nat(s.height);
     Auth.fingerprintInto(w, s.authority);
@@ -1000,6 +1230,7 @@ module {
     Eod.fingerprintInto(w, s.eod);
     TreasuryCore.fingerprintInto(w, s.treasury);
     CallCore.fingerprintInto(w, s.calls);
+    CustodyCore.fingerprintInto(w, s.custody);
   };
   public func fingerprint(s : State) : Blob { let w = JC.Writer(); fingerprintInto(w, s); KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob()) };
   /// The fingerprint by section, so a divergence between the live state and a fresh fold names the sub-state.
@@ -1013,6 +1244,7 @@ module {
       one("eod", func(w) { Eod.fingerprintInto(w, s.eod) }),
       one("treasury", func(w) { TreasuryCore.fingerprintInto(w, s.treasury) }),
       one("calls", func(w) { CallCore.fingerprintInto(w, s.calls) }),
+      one("custody", func(w) { CustodyCore.fingerprintInto(w, s.custody) }),
     ]
   };
 

@@ -40,6 +40,7 @@ import P "mo:kernel/auth/Permissions";
 import DL "mo:kernel/domain/DomainLog";
 import DomainCert "mo:kernel/domain/DomainCert";
 import Batch "mo:kernel/batch/Batch";
+import RI "mo:kernel/index/RegionIndex";
 
 import TT "mo:manticore/TreasuryTypes";
 import TreasuryCore "mo:manticore/TreasuryCore";
@@ -59,6 +60,8 @@ import Fixings "Fixings";
 import Eod "EndOfDay";
 import CallT "CallTypes";
 import CallCore "CallCore";
+import CuT "CustodyTypes";
+import CustodyCore "CustodyCore";
 
 shared (initMsg) persistent actor class Desk(init : {
   /// Books to open at genesis, parents before children.
@@ -80,6 +83,12 @@ shared (initMsg) persistent actor class Desk(init : {
   let installer : Principal = initMsg.caller;
   let desk : Core.State = Core.newState(installer);
   let deskLog : DL.State = DL.newState();
+  /// The replay's own arena, reused by every replay in steps: its pages are handed out again from the start when a
+  /// replay begins, so a verification never grows the contract's memory beyond one replay's worth. The template
+  /// arena is never allocated from; it only says what a fresh arena's free list looks like.
+  let replayArena : RI.Arena = RI.newArena();
+  let arenaTemplate : RI.Arena = RI.newArena();
+  transient var replay : ?Core.Replay = null;
   let cert : DomainCert.State = DomainCert.newState();
   let journal : JCore.State = JCore.newState(Principal.fromActor(self));
   let journalLog : JLog.State = JLog.newState();
@@ -410,7 +419,38 @@ shared (initMsg) persistent actor class Desk(init : {
     { deskLive = Core.fingerprint(desk); deskReplayed = Core.fingerprint(freshDesk); journalLive = JCore.fingerprint(journal); journalReplayed = JCore.fingerprint(freshJournal); deskHeight = desk.height; journalHeight = JCore.height(journal) }
   };
 
-  /// The fingerprint by section, live and replayed, naming the sub-state that diverges when one does.
+  /// The live fingerprints alone, for a comparison across an upgrade or around a refusal.
+  public query func liveFingerprints() : async { desk : Blob; journal : Blob; deskHeight : Nat; journalHeight : Nat } {
+    { desk = Core.fingerprint(desk); journal = JCore.fingerprint(journal); deskHeight = desk.height; journalHeight = JCore.height(journal) }
+  };
+  /// The fold of both logs in steps, for a log longer than one message can fold: `beginReplay` fixes the targets
+  /// at the live heights and resets the replay arena; `advanceReplay` applies up to a page of desk blocks and the
+  /// journal to each mark; `replaySections` compares the replayed state with the live one section by section
+  /// once complete, and says so when the live state has moved past the targets since. Open methods: a caller
+  /// chooses nothing and the replay writes nothing but its own scratch state.
+  public shared func beginReplay() : async { deskTarget : Nat; journalTarget : Nat } {
+    replayArena.pageCount := 0; replayArena.freeHead := arenaTemplate.freeHead; replayArena.freeCount := 0;
+    let r = Core.replayBegin(installer, replayArena, desk.height, JLog.length(journalLog));
+    replay := ?r;
+    { deskTarget = r.deskTarget; journalTarget = r.journalTarget }
+  };
+  public shared func advanceReplay(blocks : Nat) : async { applied : Nat; next : Nat; deskTarget : Nat; complete : Bool } {
+    let ?r = replay else Runtime.trap("Desk: no replay has begun");
+    let n = Nat.min(Nat.max(blocks, 1), DL.MAX_RANGE);
+    let blocksToApply : [Core.Block] = if (r.next < r.deskTarget) DL.page(deskLog, codec, r.next, Nat.min(n, r.deskTarget - r.next)).blocks else [];
+    let applied = Core.replayStep(r, blocksToApply, func(from : Nat, want : Nat) : [JT.Block] { JLog.getRange(journalLog, from, Nat.min(want, 1000)) });
+    { applied; next = r.next; deskTarget = r.deskTarget; complete = r.complete }
+  };
+  public query func replaySections() : async { complete : Bool; current : Bool; deskTarget : Nat; deskHeight : Nat; sections : [(Text, Blob, Blob)] } {
+    let ?r = replay else return { complete = false; current = false; deskTarget = 0; deskHeight = desk.height; sections = [] };
+    let live = Core.fingerprintSections(desk);
+    let replayed = Core.fingerprintSections(r.state);
+    { complete = r.complete; current = r.complete and r.deskTarget == desk.height and r.journalTarget == JLog.length(journalLog); deskTarget = r.deskTarget; deskHeight = desk.height;
+      sections = Array.tabulate<(Text, Blob, Blob)>(live.size(), func(i) { (live[i].0, live[i].1, replayed[i].1) }) }
+  };
+
+  /// The fingerprint by section, live and replayed in one message, naming the sub-state that diverges when one
+  /// does; a log longer than one message folds is compared through the replay in steps instead.
   public query func fingerprintSections() : async [(Text, Blob, Blob)] {
     let fresh = Core.replay(installer, allDeskBlocks(), allJournalBlocks());
     let live = Core.fingerprintSections(desk);
@@ -541,6 +581,35 @@ shared (initMsg) persistent actor class Desk(init : {
   /// The interest a call has earned or owed to a day, by the row's base and rate: what the next accrual will post.
   public query func callAccrualTo(id : Nat, day : Nat) : async ?Int { switch (CallCore.row(desk.calls, id)) { case (?r) ?CallCore.accrualTarget(r, day); case null null } };
   public query func callStatus() : async { opened : Nat; open : Nat; interestTotal : Int } { CallCore.status(desk.calls) };
+
+  // ── securities services ──
+  public query func custodyStatus() : async { policy : ?CuT.Policy; status : CuT.Status } { { policy = CustodyCore.policy(desk.custody); status = CustodyCore.status(desk.custody) } };
+  public query func instrumentExtension(isin : Text) : async ?CustodyCore.InstrumentRow { CustodyCore.instrument(desk.custody, isin) };
+  public query func depot(id : Text) : async ?CustodyCore.DepotRow { CustodyCore.depot(desk.custody, id) };
+  public query func bookDepot(book : T.BookId) : async ?Text { CustodyCore.bookDepotOf(desk.custody, book) };
+  public query func dealDepot(deal : Nat) : async ?Text { CustodyCore.dealDepotOf(desk.custody, deal) };
+  /// The settled position of a depot in an instrument: the holdings of every lot in it.
+  public query func depotPosition(depotId : Text, isin : Text) : async CuT.PositionView { CustodyCore.position(desk.custody, depotId, isin) };
+  public query func depotHoldings(depotId : Text) : async [CuT.HoldingView] {
+    CustodyCore.holdingsOf(desk.custody, depotId, func(lot : Nat) : (Text, Text) { switch (TreasuryCore.row(desk.treasury, lot)) { case (?r) (r.isin, r.book); case null ("", "") } })
+  };
+  /// The trade-date position of a book in an instrument less what has settled into its depots: the purchase lots
+  /// captured whose first leg has not settled, and the sales captured whose first leg has not settled.
+  public shared query ({ caller }) func pendingSettlement(book : T.BookId, isin : Text) : async Result.Result<{ purchases : Nat; sales : Nat }, T.Error> {
+    if (not Auth.mayReadBook(readScope(caller), book)) return #err(#OutsideBookScope({ book }));
+    var purchases = 0; var sales = 0;
+    for (r in TreasuryCore.dealsOfBook(desk.treasury, book).vals()) {
+      if (r.kind == 4 and Text.equal(r.isin, isin) and TreasuryCore.isOpen(r) and not TreasuryCore.legSettled(r, 0)) {
+        if ((r.flags & TreasuryCore.F_BUY) != 0) purchases += r.notional else sales += r.notional;
+      };
+    };
+    #ok({ purchases; sales })
+  };
+  public query func corporateAction(id : Nat) : async ?CuT.ActionView { switch (CustodyCore.action(desk.custody, id)) { case (?r) ?CustodyCore.actionView(r); case null null } };
+  public query func corporateActionsOf(isin : Text) : async [CuT.ActionView] { Array.map<CustodyCore.ActionRow, CuT.ActionView>(CustodyCore.actionsOf(desk.custody, isin), CustodyCore.actionView) };
+  public query func entitlements(action : Nat) : async [CuT.EntitlementView] {
+    Array.map<CustodyCore.EntitlementRow, CuT.EntitlementView>(CustodyCore.entitlementsOf(desk.custody, action), func(e) { CustodyCore.entitlementView(desk.custody, e) })
+  };
   public shared query ({ caller }) func treasuryLots(book : Text, isin : Text) : async Result.Result<[TT.DealView], T.Error> {
     if (not Auth.mayReadBook(readScope(caller), book)) return #err(#OutsideBookScope({ book }));
     #ok(Array.map<TreasuryCore.DealRow, TT.DealView>(TreasuryCore.lotsOf(desk.treasury, book, isin), func(r) { Core.dealView(desk, deskBlocks(), r) }))

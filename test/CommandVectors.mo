@@ -8,6 +8,15 @@ import Freeze "mo:kernel/domain/Freeze";
 module {
   public func vectors() : [Freeze.Vector] {
     [
+      { family = "setCustodyPolicy"; version = 1; hex = "47aea7439affd69f53e4695db5dd0f1aaa6e00dc401da0db3cd36a72e8c8f53e" },
+      { family = "extendInstrument"; version = 1; hex = "427c97507f3b49d58974435522b43107c24c5b8c7f2541106f59de4b8f8048c3" },
+      { family = "openDepot"; version = 1; hex = "847fcb78857beb67f94cf24860f880f5f5a92ad1ff49c4808d523a34084b1764" },
+      { family = "setBookDepot"; version = 1; hex = "cc2fcb4807ecc70e937357a9bd343fe467b07e19fc8c6ef369e3f11ac67e3f3d" },
+      { family = "assignDealDepot"; version = 1; hex = "9e687db574d18102e2d73d41198575d853d0862339b0f97d9cd03c4c93cc7526" },
+      { family = "transferDepot"; version = 1; hex = "d37523f2a910a44dd0b8e095d9ea434444af132ed4a3e5bc2e7f7c7e17e8ed53" },
+      { family = "announceCorporateAction"; version = 1; hex = "38923e9980126700ffccaf69ef720aa44e173ab3966f730848efc7bb4269510c" },
+      { family = "cancelCorporateAction"; version = 1; hex = "5c74f73f2eb313efca3309c9c1e42d5cefe05c6f8c9f8fee22ef4235e43f53ec" },
+      { family = "processCorporateAction"; version = 1; hex = "2a9aed1cf5ce7ef1a2a7f8dbd342ebab0be4c99cf2f10a912c50c8594cc41144" },
       { family = "revaluePositions"; version = 1; hex = "ce510c9518df7f08d575b2454a63e588e0ef1fd6aa81c2809c3a8061eae81816" },
       { family = "openCall"; version = 1; hex = "4664ba44afd446fdb3d81c7d041ac450374fd82b3833e0416239e8f3a6b72b41" },
       { family = "resetCallRate"; version = 1; hex = "c9fa8753cf29b9850384582be47a99ab01ccd0bb3b0f2ce5ec4998c538c34744" },

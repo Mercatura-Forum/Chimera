@@ -80,6 +80,53 @@ class Reader(V.Reader):
         return {"placement": self.bool(), "currency": self.text(), "principal": self.nat(), "rateBps": self.nat(), "dayCount": self.p_convention(),
                 "noticeDays": self.nat(), "interestEveryDays": self.nat(), "capitalise": self.bool(), "cash": self.cash(), "start": self.nat()}
 
+    CLASSES = {1: "sovereign", 2: "supranational", 3: "financial", 4: "corporate"}
+    BASES = {0: "contractual", 1: "actual"}
+
+    def extension(self):
+        return {"isin": self.text(), "lei": self.text(), "classification": self.CLASSES[self.byte()], "market": self.text(), "settlementCycleDays": self.nat(),
+                "quotation": {0: "pricePer100", 1: "yield"}[self.byte()], "minDenomination": self.nat()}
+
+    def depot(self):
+        return {"id": self.text(), "custodian": self.t_counterparty(), "place": self.text(), "safekeepingAccount": self.text()}
+
+    def ca_kind(self):
+        t = self.byte(); v = self.nat()
+        return {1: {"coupon": {"perHundredMicro": v}}, 2: {"partialRedemption": {"ratioBps": v}}, 3: {"earlyRedemption": {"priceMicro": v}}, 4: {"cashDistribution": {"perHundredMicro": v}}}[t]
+
+    def announcement(self):
+        return {"isin": self.text(), "kind": self.ca_kind(), "recordDate": self.nat(), "exDate": self.nat(), "paymentDate": self.nat(), "source": self.blob()}
+
+    def custody_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"policySet": {"entitlementBasis": self.BASES[self.byte()]}}
+        if t == 0x02:
+            return {"instrumentExtended": {"extension": self.extension(), "day": self.nat()}}
+        if t == 0x03:
+            return {"depotOpened": {"depot": self.depot(), "day": self.nat()}}
+        if t == 0x04:
+            return {"bookDepotSet": {"book": self.text(), "depot": self.text(), "day": self.nat()}}
+        if t == 0x05:
+            return {"dealDepotAssigned": {"deal": self.nat(), "depot": self.text(), "day": self.nat()}}
+        if t == 0x06:
+            return {"transferred": {"lot": self.nat(), "from": self.text(), "to": self.text(), "nominal": self.nat(), "reference": self.text(), "day": self.nat()}}
+        if t == 0x07:
+            return {"announced": {"announcement": self.announcement(), "day": self.nat()}}
+        if t == 0x08:
+            return {"cancelled": {"action": self.nat(), "reason": self.text(), "day": self.nat()}}
+        if t == 0x09:
+            return {"entitlementRecorded": {"action": self.nat(), "lot": self.nat(), "depot": self.text(), "nominal": self.nat(), "amount": self.nat(), "basis": self.BASES[self.byte()], "day": self.nat()}}
+        if t == 0x0A:
+            return {"entitled": {"action": self.nat(), "lots": self.nat(), "total": self.nat(), "day": self.nat()}}
+        if t == 0x0B:
+            return {"entitlementPaid": {"action": self.nat(), "lot": self.nat(), "amount": self.nat(), "nominal": self.nat(), "realised": self.int_(), "day": self.nat()}}
+        if t == 0x0C:
+            return {"paid": {"action": self.nat(), "lots": self.nat(), "total": self.nat(), "day": self.nat()}}
+        if t == 0x0D:
+            return {"entitlementClaimed": {"action": self.nat(), "lot": self.nat(), "amount": self.nat(), "accrued": self.int_(), "day": self.nat()}}
+        raise ValueError(f"unknown custody event tag {t:#x}")
+
     def call_event(self):
         t = self.byte()
         if t == 0x01:
@@ -171,6 +218,24 @@ class Reader(V.Reader):
             return {"serveCallNotice": {"call": self.nat()}}
         if tag == 0x44:
             return {"settleCall": {"call": self.nat(), **self.dates()}}
+        if tag == 0x50:
+            return {"setCustodyPolicy": {"entitlementBasis": self.BASES[self.byte()]}}
+        if tag == 0x51:
+            return {"extendInstrument": {"extension": self.extension()}}
+        if tag == 0x52:
+            return {"openDepot": {"depot": self.depot()}}
+        if tag == 0x53:
+            return {"setBookDepot": {"book": self.text(), "depot": self.text()}}
+        if tag == 0x54:
+            return {"assignDealDepot": {"deal": self.nat(), "depot": self.text()}}
+        if tag == 0x55:
+            return {"transferDepot": {"lot": self.nat(), "from": self.text(), "to": self.text(), "nominal": self.nat(), "reference": self.text()}}
+        if tag == 0x56:
+            return {"announceCorporateAction": {"announcement": self.announcement()}}
+        if tag == 0x57:
+            return {"cancelCorporateAction": {"action": self.nat(), "reason": self.text()}}
+        if tag == 0x58:
+            return {"processCorporateAction": {"action": self.nat(), **self.dates()}}
         raise ValueError(f"unknown command tag {tag:#x}")
 
     def proposed(self):
@@ -252,6 +317,8 @@ class Reader(V.Reader):
             return {"treasury": self.treasury_event()}
         if t == 0x60:
             return {"call": self.call_event()}
+        if t == 0x61:
+            return {"custody": self.custody_event()}
         raise ValueError(f"unknown desk event tag {t:#x}")
 
     # ── lifted without change from Manticore's verify_bank.py at 9c0c30e ──

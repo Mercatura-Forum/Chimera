@@ -34,6 +34,7 @@ import DC "mo:manticore/DayCount";
 import PC "mo:manticore/ProductCanonical";
 
 import CallT "CallTypes";
+import CuT "CustodyTypes";
 
 import T "DeskTypes";
 
@@ -128,6 +129,73 @@ module {
     }
   };
 
+  func wClass(w : JC.Writer, c : CuT.Classification) { w.byte(switch (c) { case (#sovereign) 1; case (#supranational) 2; case (#financial) 3; case (#corporate) 4 }) };
+  func rClass(r : JC.Reader) : ?CuT.Classification { switch (r.byte()) { case (?1) ?#sovereign; case (?2) ?#supranational; case (?3) ?#financial; case (?4) ?#corporate; case (_) null } };
+  func wExtension(w : JC.Writer, e : CuT.Extension) { w.text(e.isin); w.text(e.lei); wClass(w, e.classification); w.text(e.market); w.nat(e.settlementCycleDays); w.byte(switch (e.quotation) { case (#pricePer100) 0; case (#yield) 1 }); w.nat(e.minDenomination) };
+  func rExtension(r : JC.Reader) : ?CuT.Extension {
+    let ?isin = r.text() else return null; let ?lei = r.text() else return null; let ?classification = rClass(r) else return null; let ?market = r.text() else return null;
+    let ?settlementCycleDays = r.nat() else return null; let quotation : CuT.Quotation = switch (r.byte()) { case (?0) #pricePer100; case (?1) #yield; case (_) return null }; let ?minDenomination = r.nat() else return null;
+    ?{ isin; lei; classification; market; settlementCycleDays; quotation; minDenomination }
+  };
+  func wDepot(w : JC.Writer, d : CuT.Depot) { w.text(d.id); TyCan.writeCounterparty(w, d.custodian); w.text(d.place); w.text(d.safekeepingAccount) };
+  func rDepot(r : JC.Reader) : ?CuT.Depot { let ?id = r.text() else return null; let ?custodian = TyCan.readCounterparty(r) else return null; let ?place = r.text() else return null; let ?safekeepingAccount = r.text() else return null; ?{ id; custodian; place; safekeepingAccount } };
+  func wBasis(w : JC.Writer, b : CuT.Basis) { w.byte(switch (b) { case (#contractual) 0; case (#actual) 1 }) };
+  func rBasis(r : JC.Reader) : ?CuT.Basis { switch (r.byte()) { case (?0) ?#contractual; case (?1) ?#actual; case (_) null } };
+  func wKind(w : JC.Writer, k : CuT.Kind) {
+    switch (k) {
+      case (#coupon(x)) { w.byte(1); w.nat(x.perHundredMicro) }; case (#partialRedemption(x)) { w.byte(2); w.nat(x.ratioBps) };
+      case (#earlyRedemption(x)) { w.byte(3); w.nat(x.priceMicro) }; case (#cashDistribution(x)) { w.byte(4); w.nat(x.perHundredMicro) };
+    }
+  };
+  func rKind(r : JC.Reader) : ?CuT.Kind {
+    let ?t = r.byte() else return null; let ?v = r.nat() else return null;
+    switch (t) { case 1 ?#coupon({ perHundredMicro = v }); case 2 ?#partialRedemption({ ratioBps = v }); case 3 ?#earlyRedemption({ priceMicro = v }); case 4 ?#cashDistribution({ perHundredMicro = v }); case _ null }
+  };
+  func wAnnouncement(w : JC.Writer, a : CuT.Announcement) { w.text(a.isin); wKind(w, a.kind); w.nat(a.recordDate); w.nat(a.exDate); w.nat(a.paymentDate); w.blob(a.source) };
+  func rAnnouncement(r : JC.Reader) : ?CuT.Announcement {
+    let ?isin = r.text() else return null; let ?kind = rKind(r) else return null; let ?recordDate = r.nat() else return null; let ?exDate = r.nat() else return null; let ?paymentDate = r.nat() else return null; let ?source = r.blob() else return null;
+    ?{ isin; kind; recordDate; exDate; paymentDate; source }
+  };
+  func wCustodyEvent(w : JC.Writer, e : CuT.Event) {
+    switch (e) {
+      case (#policySet(p)) { w.byte(0x01); wBasis(w, p.entitlementBasis) };
+      case (#instrumentExtended(x)) { w.byte(0x02); wExtension(w, x.extension); w.nat(x.day) };
+      case (#depotOpened(x)) { w.byte(0x03); wDepot(w, x.depot); w.nat(x.day) };
+      case (#bookDepotSet(x)) { w.byte(0x04); w.text(x.book); w.text(x.depot); w.nat(x.day) };
+      case (#dealDepotAssigned(x)) { w.byte(0x05); w.nat(x.deal); w.text(x.depot); w.nat(x.day) };
+      case (#transferred(x)) { w.byte(0x06); w.nat(x.lot); w.text(x.from); w.text(x.to); w.nat(x.nominal); w.text(x.reference); w.nat(x.day) };
+      case (#announced(x)) { w.byte(0x07); wAnnouncement(w, x.announcement); w.nat(x.day) };
+      case (#cancelled(x)) { w.byte(0x08); w.nat(x.action); w.text(x.reason); w.nat(x.day) };
+      case (#entitlementRecorded(x)) { w.byte(0x09); w.nat(x.action); w.nat(x.lot); w.text(x.depot); w.nat(x.nominal); w.nat(x.amount); wBasis(w, x.basis); w.nat(x.day) };
+      case (#entitled(x)) { w.byte(0x0A); w.nat(x.action); w.nat(x.lots); w.nat(x.total); w.nat(x.day) };
+      case (#entitlementPaid(x)) { w.byte(0x0B); w.nat(x.action); w.nat(x.lot); w.nat(x.amount); w.nat(x.nominal); wInt(w, x.realised); w.nat(x.day) };
+      case (#paid(x)) { w.byte(0x0C); w.nat(x.action); w.nat(x.lots); w.nat(x.total); w.nat(x.day) };
+      case (#entitlementClaimed(x)) { w.byte(0x0D); w.nat(x.action); w.nat(x.lot); w.nat(x.amount); wInt(w, x.accrued); w.nat(x.day) };
+    }
+  };
+  func rCustodyEvent(r : JC.Reader) : ?CuT.Event {
+    switch (r.byte()) {
+      case (?0x01) { let ?entitlementBasis = rBasis(r) else return null; ?#policySet({ entitlementBasis }) };
+      case (?0x02) { let ?extension = rExtension(r) else return null; let ?day = r.nat() else return null; ?#instrumentExtended({ extension; day }) };
+      case (?0x03) { let ?depot = rDepot(r) else return null; let ?day = r.nat() else return null; ?#depotOpened({ depot; day }) };
+      case (?0x04) { let ?book = r.text() else return null; let ?depot = r.text() else return null; let ?day = r.nat() else return null; ?#bookDepotSet({ book; depot; day }) };
+      case (?0x05) { let ?deal = r.nat() else return null; let ?depot = r.text() else return null; let ?day = r.nat() else return null; ?#dealDepotAssigned({ deal; depot; day }) };
+      case (?0x06) { let ?lot = r.nat() else return null; let ?from = r.text() else return null; let ?to = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; let ?day = r.nat() else return null; ?#transferred({ lot; from; to; nominal; reference; day }) };
+      case (?0x07) { let ?announcement = rAnnouncement(r) else return null; let ?day = r.nat() else return null; ?#announced({ announcement; day }) };
+      case (?0x08) { let ?action = r.nat() else return null; let ?reason = r.text() else return null; let ?day = r.nat() else return null; ?#cancelled({ action; reason; day }) };
+      case (?0x09) {
+        let ?action = r.nat() else return null; let ?lot = r.nat() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?amount = r.nat() else return null;
+        let ?basis = rBasis(r) else return null; let ?day = r.nat() else return null;
+        ?#entitlementRecorded({ action; lot; depot; nominal; amount; basis; day })
+      };
+      case (?0x0A) { let ?action = r.nat() else return null; let ?lots = r.nat() else return null; let ?total = r.nat() else return null; let ?day = r.nat() else return null; ?#entitled({ action; lots; total; day }) };
+      case (?0x0B) { let ?action = r.nat() else return null; let ?lot = r.nat() else return null; let ?amount = r.nat() else return null; let ?nominal = r.nat() else return null; let ?realised = rInt(r) else return null; let ?day = r.nat() else return null; ?#entitlementPaid({ action; lot; amount; nominal; realised; day }) };
+      case (?0x0C) { let ?action = r.nat() else return null; let ?lots = r.nat() else return null; let ?total = r.nat() else return null; let ?day = r.nat() else return null; ?#paid({ action; lots; total; day }) };
+      case (?0x0D) { let ?action = r.nat() else return null; let ?lot = r.nat() else return null; let ?amount = r.nat() else return null; let ?accrued = rInt(r) else return null; let ?day = r.nat() else return null; ?#entitlementClaimed({ action; lot; amount; accrued; day }) };
+      case (_) null;
+    }
+  };
+
   public func writeScope(w : JC.Writer, s : AT.Scope) { wOptTexts(w, s.partitions); wOptTexts(w, s.currencies); wMoneys(w, s.ceiling); wMoneys(w, s.dailyLimit) };
   public func readScope(r : JC.Reader) : ?AT.Scope {
     let ?partitions = rOptTexts(r) else return null; let ?currencies = rOptTexts(r) else return null;
@@ -185,6 +253,15 @@ module {
       case (#adjustCallBalance(x)) { w.byte(0x42); w.nat(x.call); wInt(w, x.delta); TyCan.writeOptPrincipal(w, x.approver); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
       case (#serveCallNotice(x)) { w.byte(0x43); w.nat(x.call) };
       case (#settleCall(x)) { w.byte(0x44); w.nat(x.call); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#setCustodyPolicy(p)) { w.byte(0x50); wBasis(w, p.entitlementBasis) };
+      case (#extendInstrument(x)) { w.byte(0x51); wExtension(w, x.extension) };
+      case (#openDepot(x)) { w.byte(0x52); wDepot(w, x.depot) };
+      case (#setBookDepot(x)) { w.byte(0x53); w.text(x.book); w.text(x.depot) };
+      case (#assignDealDepot(x)) { w.byte(0x54); w.nat(x.deal); w.text(x.depot) };
+      case (#transferDepot(x)) { w.byte(0x55); w.nat(x.lot); w.text(x.from); w.text(x.to); w.nat(x.nominal); w.text(x.reference) };
+      case (#announceCorporateAction(x)) { w.byte(0x56); wAnnouncement(w, x.announcement) };
+      case (#cancelCorporateAction(x)) { w.byte(0x57); w.nat(x.action); w.text(x.reason) };
+      case (#processCorporateAction(x)) { w.byte(0x58); w.nat(x.action); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
       case (#setTreasuryPolicy(p)) { w.byte(0x20); TyCan.writePolicy(w, p) };
       case (#registerSecurity(x)) { w.byte(0x21); TyCan.writeSecurityTerms(w, x.terms) };
       case (#publishCurve(x)) { w.byte(0x22); TyCan.writeCurve(w, x.curve) };
@@ -247,6 +324,15 @@ module {
       case 0x42 { let ?call = r.nat() else return null; let ?delta = rInt(r) else return null; let ?approver = TyCan.readOptPrincipal(r) else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#adjustCallBalance({ call; delta; approver; postingDate; valueDate; period; narration }) };
       case 0x43 { let ?call = r.nat() else return null; ?#serveCallNotice({ call }) };
       case 0x44 { let ?call = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#settleCall({ call; postingDate; valueDate; period; narration }) };
+      case 0x50 { let ?entitlementBasis = rBasis(r) else return null; ?#setCustodyPolicy({ entitlementBasis }) };
+      case 0x51 { let ?extension = rExtension(r) else return null; ?#extendInstrument({ extension }) };
+      case 0x52 { let ?depot = rDepot(r) else return null; ?#openDepot({ depot }) };
+      case 0x53 { let ?book = r.text() else return null; let ?depot = r.text() else return null; ?#setBookDepot({ book; depot }) };
+      case 0x54 { let ?deal = r.nat() else return null; let ?depot = r.text() else return null; ?#assignDealDepot({ deal; depot }) };
+      case 0x55 { let ?lot = r.nat() else return null; let ?from = r.text() else return null; let ?to = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; ?#transferDepot({ lot; from; to; nominal; reference }) };
+      case 0x56 { let ?announcement = rAnnouncement(r) else return null; ?#announceCorporateAction({ announcement }) };
+      case 0x57 { let ?action = r.nat() else return null; let ?reason = r.text() else return null; ?#cancelCorporateAction({ action; reason }) };
+      case 0x58 { let ?action = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#processCorporateAction({ action; postingDate; valueDate; period; narration }) };
       case 0x20 { let ?p = TyCan.readPolicy(r) else return null; ?#setTreasuryPolicy(p) };
       case 0x21 { let ?terms = TyCan.readSecurityTerms(r) else return null; ?#registerSecurity({ terms }) };
       case 0x22 { let ?curve = TyCan.readCurve(r) else return null; ?#publishCurve({ curve }) };
@@ -441,6 +527,7 @@ module {
       case (#alert(a)) { w.byte(0x48); wAlert(w, a) };
       case (#treasury(te)) { w.byte(0x55); TyCan.writeEvent(w, te) };
       case (#call(ce)) { w.byte(0x60); wCallEvent(w, ce) };
+      case (#custody(ce)) { w.byte(0x61); wCustodyEvent(w, ce) };
     }
   };
 
@@ -485,6 +572,7 @@ module {
       case 0x48 { let ?a = rAlert(r) else return null; ?#alert(a) };
       case 0x55 { let ?te = TyCan.readEvent(r) else return null; ?#treasury(te) };
       case 0x60 { let ?ce = rCallEvent(r) else return null; ?#call(ce) };
+      case 0x61 { let ?ce = rCustodyEvent(r) else return null; ?#custody(ce) };
       case _ null;
     };
     switch (out) {
