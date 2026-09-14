@@ -20,7 +20,7 @@ Debug.print("count: catalogue checks = " # Nat.toText(report.checked));
 let summary = P.summarise(Cat.catalogue());
 check(summary.commands == Cat.commandNames().size(), "one command row per family");
 check(summary.methods == Cat.guardedMethods().size(), "one method row per guarded method");
-check(summary.moneyMoving == 5, "five money-moving rows: amend, cancel, settle, mark, resolve");
+check(summary.moneyMoving == 9, "nine money-moving rows: amend, cancel, settle, mark, resolve, revalue, the call rate, balance and settlement");
 Debug.print("count: catalogue rows = " # Nat.toText(summary.rows));
 Debug.print("count: money-moving rows = " # Nat.toText(summary.moneyMoving));
 Debug.print("count: dual-by-default rows = " # Nat.toText(summary.dual));

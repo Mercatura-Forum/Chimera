@@ -14,6 +14,7 @@
 /// Attribution: Thebes Core Team. Licence: Apache 2.0.
 
 import Array "mo:core/Array";
+import Int "mo:core/Int";
 import VarArray "mo:core/VarArray";
 import Blob "mo:core/Blob";
 
@@ -29,6 +30,10 @@ import TyCan "mo:manticore/TreasuryCanonical";
 import CC "mo:manticore/CloseCanonical";
 import MT "mo:manticore/MonitoringTypes";
 import AlT "mo:manticore/AlertTypes";
+import DC "mo:manticore/DayCount";
+import PC "mo:manticore/ProductCanonical";
+
+import CallT "CallTypes";
 
 import T "DeskTypes";
 
@@ -79,6 +84,49 @@ module {
   };
   func wOptDay(w : JC.Writer, o : ?Nat) { switch (o) { case null w.byte(0); case (?x) { w.byte(1); w.nat(x) } } };
   func rOptDay(r : JC.Reader) : ??Nat { switch (r.byte()) { case (?0) ?null; case (?1) { let ?x = r.nat() else return null; ??x }; case (_) null } };
+
+  func wInt(w : JC.Writer, i : Int) { w.byte(if (i < 0) 1 else 0); w.nat(Int.abs(i)) };
+  func rInt(r : JC.Reader) : ?Int { let ?neg = r.byte() else return null; let ?m = r.nat() else return null; if (neg == 1) ?(-m) else ?m };
+  func wCash(w : JC.Writer, c : { account : Text; sub : ?Text }) { w.text(c.account); wOptText(w, c.sub) };
+  func rCash(r : JC.Reader) : ?{ account : Text; sub : ?Text } { let ?account = r.text() else return null; let ?sub = rOptText(r) else return null; ?{ account; sub } };
+  public func wCallTerms(w : JC.Writer, t : CallT.Terms) {
+    w.bool(t.placement); w.text(t.currency); w.nat(t.principal); w.nat(t.rateBps); PC.wConvention(w, t.dayCount); w.nat(t.noticeDays); w.nat(t.interestEveryDays); w.bool(t.capitalise); wCash(w, t.cash); w.nat(t.start);
+  };
+  public func rCallTerms(r : JC.Reader) : ?CallT.Terms {
+    let ?placement = r.bool() else return null; let ?currency = r.text() else return null; let ?principal = r.nat() else return null; let ?rateBps = r.nat() else return null;
+    let ?dayCount = PC.rConvention(r) else return null; let ?noticeDays = r.nat() else return null; let ?interestEveryDays = r.nat() else return null; let ?capitalise = r.bool() else return null;
+    let ?cash = rCash(r) else return null; let ?start = r.nat() else return null;
+    ?{ placement; currency; principal; rateBps; dayCount; noticeDays; interestEveryDays; capitalise; cash; start }
+  };
+  func wCallEvent(w : JC.Writer, e : CallT.Event) {
+    switch (e) {
+      case (#opened(x)) { w.byte(0x01); w.text(x.book); TyCan.writeCounterparty(w, x.counterparty); wCallTerms(w, x.terms); w.text(x.reference); w.principal(x.trader); w.nat(x.day); w.bool(x.withinLimits); TyCan.writeOptPrincipal(w, x.approver) };
+      case (#funded(x)) { w.byte(0x02); w.nat(x.call); w.nat(x.amount); w.nat(x.day) };
+      case (#rateReset(x)) { w.byte(0x03); w.nat(x.call); w.nat(x.rateBps); w.nat(x.day); wInt(w, x.catchUp) };
+      case (#balanceAdjusted(x)) { w.byte(0x04); w.nat(x.call); wInt(w, x.delta); w.nat(x.day); wInt(w, x.catchUp) };
+      case (#noticeServed(x)) { w.byte(0x05); w.nat(x.call); w.nat(x.day); w.nat(x.repayDay) };
+      case (#accrued(x)) { w.byte(0x06); w.nat(x.call); wInt(w, x.interest); w.nat(x.day) };
+      case (#interestSettled(x)) { w.byte(0x07); w.nat(x.call); w.nat(x.amount); w.bool(x.capitalised); w.nat(x.day) };
+      case (#repaid(x)) { w.byte(0x08); w.nat(x.call); w.nat(x.principal); w.nat(x.interest); w.nat(x.day) };
+    }
+  };
+  func rCallEvent(r : JC.Reader) : ?CallT.Event {
+    switch (r.byte()) {
+      case (?0x01) {
+        let ?book = r.text() else return null; let ?counterparty = TyCan.readCounterparty(r) else return null; let ?terms = rCallTerms(r) else return null; let ?reference = r.text() else return null;
+        let ?trader = r.principal() else return null; let ?day = r.nat() else return null; let ?withinLimits = r.bool() else return null; let ?approver = TyCan.readOptPrincipal(r) else return null;
+        ?#opened({ book; counterparty; terms; reference; trader; day; withinLimits; approver })
+      };
+      case (?0x02) { let ?call = r.nat() else return null; let ?amount = r.nat() else return null; let ?day = r.nat() else return null; ?#funded({ call; amount; day }) };
+      case (?0x03) { let ?call = r.nat() else return null; let ?rateBps = r.nat() else return null; let ?day = r.nat() else return null; let ?catchUp = rInt(r) else return null; ?#rateReset({ call; rateBps; day; catchUp }) };
+      case (?0x04) { let ?call = r.nat() else return null; let ?delta = rInt(r) else return null; let ?day = r.nat() else return null; let ?catchUp = rInt(r) else return null; ?#balanceAdjusted({ call; delta; day; catchUp }) };
+      case (?0x05) { let ?call = r.nat() else return null; let ?day = r.nat() else return null; let ?repayDay = r.nat() else return null; ?#noticeServed({ call; day; repayDay }) };
+      case (?0x06) { let ?call = r.nat() else return null; let ?interest = rInt(r) else return null; let ?day = r.nat() else return null; ?#accrued({ call; interest; day }) };
+      case (?0x07) { let ?call = r.nat() else return null; let ?amount = r.nat() else return null; let ?capitalised = r.bool() else return null; let ?day = r.nat() else return null; ?#interestSettled({ call; amount; capitalised; day }) };
+      case (?0x08) { let ?call = r.nat() else return null; let ?principal = r.nat() else return null; let ?interest = r.nat() else return null; let ?day = r.nat() else return null; ?#repaid({ call; principal; interest; day }) };
+      case (_) null;
+    }
+  };
 
   public func writeScope(w : JC.Writer, s : AT.Scope) { wOptTexts(w, s.partitions); wOptTexts(w, s.currencies); wMoneys(w, s.ceiling); wMoneys(w, s.dailyLimit) };
   public func readScope(r : JC.Reader) : ?AT.Scope {
@@ -131,6 +179,12 @@ module {
       case (#setRetryPolicy(x)) { w.byte(0x35); w.text(x.book); w.nat(x.limit) };
       case (#resolveEndOfDayFailure(x)) { w.byte(0x36); w.text(x.book); w.nat(x.businessDate); w.nat(x.item); w.nat(x.entity); w.text(x.reason) };
       case (#clearAlert(x)) { w.byte(0x37); w.nat(x.alert); w.text(x.reason) };
+      case (#revaluePositions(x)) { w.byte(0x38); w.text(x.period); w.nat(x.postingDate); w.nat(x.valueDate); w.text(x.narration) };
+      case (#openCall(x)) { w.byte(0x40); w.text(x.book); TyCan.writeCounterparty(w, x.counterparty); wCallTerms(w, x.terms); w.text(x.reference); TyCan.writeOptPrincipal(w, x.approver) };
+      case (#resetCallRate(x)) { w.byte(0x41); w.nat(x.call); w.nat(x.rateBps); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#adjustCallBalance(x)) { w.byte(0x42); w.nat(x.call); wInt(w, x.delta); TyCan.writeOptPrincipal(w, x.approver); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#serveCallNotice(x)) { w.byte(0x43); w.nat(x.call) };
+      case (#settleCall(x)) { w.byte(0x44); w.nat(x.call); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
       case (#setTreasuryPolicy(p)) { w.byte(0x20); TyCan.writePolicy(w, p) };
       case (#registerSecurity(x)) { w.byte(0x21); TyCan.writeSecurityTerms(w, x.terms) };
       case (#publishCurve(x)) { w.byte(0x22); TyCan.writeCurve(w, x.curve) };
@@ -183,6 +237,16 @@ module {
         ?#resolveEndOfDayFailure({ book; businessDate; item; entity; reason })
       };
       case 0x37 { let ?alert = r.nat() else return null; let ?reason = r.text() else return null; ?#clearAlert({ alert; reason }) };
+      case 0x38 { let ?period = r.text() else return null; let ?postingDate = r.nat() else return null; let ?valueDate = r.nat() else return null; let ?narration = r.text() else return null; ?#revaluePositions({ period; postingDate; valueDate; narration }) };
+      case 0x40 {
+        let ?book = r.text() else return null; let ?counterparty = TyCan.readCounterparty(r) else return null; let ?terms = rCallTerms(r) else return null;
+        let ?reference = r.text() else return null; let ?approver = TyCan.readOptPrincipal(r) else return null;
+        ?#openCall({ book; counterparty; terms; reference; approver })
+      };
+      case 0x41 { let ?call = r.nat() else return null; let ?rateBps = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#resetCallRate({ call; rateBps; postingDate; valueDate; period; narration }) };
+      case 0x42 { let ?call = r.nat() else return null; let ?delta = rInt(r) else return null; let ?approver = TyCan.readOptPrincipal(r) else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#adjustCallBalance({ call; delta; approver; postingDate; valueDate; period; narration }) };
+      case 0x43 { let ?call = r.nat() else return null; ?#serveCallNotice({ call }) };
+      case 0x44 { let ?call = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#settleCall({ call; postingDate; valueDate; period; narration }) };
       case 0x20 { let ?p = TyCan.readPolicy(r) else return null; ?#setTreasuryPolicy(p) };
       case 0x21 { let ?terms = TyCan.readSecurityTerms(r) else return null; ?#registerSecurity({ terms }) };
       case 0x22 { let ?curve = TyCan.readCurve(r) else return null; ?#publishCurve({ curve }) };
@@ -372,10 +436,11 @@ module {
       case (#dailyConsumed(x)) { w.byte(0x18); w.principal(x.subject); w.text(x.currency); w.nat(x.day); w.nat(x.amount) };
       case (#close(ce)) { w.byte(0x20); CC.writeEvent(w, ce) };
       case (#fixingRecorded(x)) { w.byte(0x21); w.text(x.index); w.nat(x.day); w.nat(x.rateBps) };
-      case (#nostroIndexFrom(x)) { w.byte(0x22); w.text(x.nostro); w.nat(x.journalHeight) };
+      case (#journalMark(x)) { w.byte(0x22); w.nat(x.height) };
       case (#eod(x)) { w.byte(0x30); wEod(w, x) };
       case (#alert(a)) { w.byte(0x48); wAlert(w, a) };
       case (#treasury(te)) { w.byte(0x55); TyCan.writeEvent(w, te) };
+      case (#call(ce)) { w.byte(0x60); wCallEvent(w, ce) };
     }
   };
 
@@ -415,10 +480,11 @@ module {
       case 0x18 { let ?subject = r.principal() else return null; let ?currency = r.text() else return null; let ?day = r.nat() else return null; let ?amount = r.nat() else return null; ?#dailyConsumed({ subject; currency; day; amount }) };
       case 0x20 { let ?ce = CC.readEvent(r) else return null; ?#close(ce) };
       case 0x21 { let ?index = r.text() else return null; let ?day = r.nat() else return null; let ?rateBps = r.nat() else return null; ?#fixingRecorded({ index; day; rateBps }) };
-      case 0x22 { let ?nostro = r.text() else return null; let ?journalHeight = r.nat() else return null; ?#nostroIndexFrom({ nostro; journalHeight }) };
+      case 0x22 { let ?height = r.nat() else return null; ?#journalMark({ height }) };
       case 0x30 { let ?x = rEod(r) else return null; ?#eod(x) };
       case 0x48 { let ?a = rAlert(r) else return null; ?#alert(a) };
       case 0x55 { let ?te = TyCan.readEvent(r) else return null; ?#treasury(te) };
+      case 0x60 { let ?ce = rCallEvent(r) else return null; ?#call(ce) };
       case _ null;
     };
     switch (out) {

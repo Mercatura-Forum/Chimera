@@ -23,6 +23,8 @@ import CT "mo:manticore/CloseTypes";
 import Fx "mo:manticore/Fx";
 import AlT "mo:manticore/AlertTypes";
 
+import CallT "CallTypes";
+
 module {
 
   public type BookId = Text;
@@ -82,6 +84,14 @@ module {
     #resolveEndOfDayFailure : { book : BookId; businessDate : Day; item : Nat; entity : Nat; reason : Text };
     // ── alerts ──
     #clearAlert : { alert : Nat; reason : Text };
+    // ── the close's revaluation of every monetary position at the day's rate ──
+    #revaluePositions : { period : JT.PeriodId; postingDate : Day; valueDate : Day; narration : Text };
+    // ── call and notice money, the desk's own family ──
+    #openCall : { book : BookId; counterparty : TT.Counterparty; terms : CallT.Terms; reference : Text; approver : ?Principal };
+    #resetCallRate : { call : CallT.CallId; rateBps : Nat; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    #adjustCallBalance : { call : CallT.CallId; delta : Int; approver : ?Principal; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    #serveCallNotice : { call : CallT.CallId };
+    #settleCall : { call : CallT.CallId; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
     // ── treasury: the thirteen commands of Manticore's treasury domain, their bodies Manticore's ──
     #setTreasuryPolicy : TT.Policy;
     #registerSecurity : { terms : TT.SecurityTerms };
@@ -138,12 +148,15 @@ module {
     #dailyConsumed : { subject : Principal; currency : Text; day : Day; amount : Nat };
     #close : CT.CloseEvent;
     #fixingRecorded : { index : Text; day : Day; rateBps : Nat };
-    /// The journal's height when a nostro was registered: the nostro's own postings are indexed as the journal commits
-    /// them from that block on, and a fresh fold of the two logs interleaves them at this point.
-    #nostroIndexFrom : { nostro : Text; journalHeight : Nat };
+    /// The journal's height at this point of the desk log, recorded before an act whose fold reads the nostro index:
+    /// a nostro's registration (its postings are indexed from that block on) and a statement (its matches mark legs
+    /// the journal committed before it). A fresh fold of the two logs feeds the journal's posted blocks to the index
+    /// up to this height before applying what follows, so the index meets every act as the live contract's did.
+    #journalMark : { height : Nat };
     #eod : EodEvent;
     #alert : AlT.AlertEvent;
     #treasury : TT.TreasuryEvent;
+    #call : CallT.Event;
   };
 
   public type BatchError = {
@@ -212,6 +225,8 @@ module {
     #BatchError : { error : BatchError };
     #AlertError : { error : AlT.AlertError };
     #TreasuryError : { error : TT.TreasuryError };
+    #CallError : { error : CallT.Error };
+    #MissingRate : { currency : Text; asOf : Day };
   };
 
   /// The kernel's authority error, flattened into the desk's: one switch, as the kernel advises.
@@ -299,10 +314,11 @@ module {
       case (#dailyConsumed(_)) "dailyConsumed";
       case (#close(_)) "close";
       case (#fixingRecorded(_)) "fixingRecorded";
-      case (#nostroIndexFrom(_)) "nostroIndexFrom";
+      case (#journalMark(_)) "journalMark";
       case (#eod(_)) "eod";
       case (#alert(_)) "alert";
       case (#treasury(_)) "treasury";
+      case (#call(_)) "call";
     }
   };
 }

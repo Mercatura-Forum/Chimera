@@ -73,6 +73,34 @@ class Reader(V.Reader):
     def opt_day(self):
         return self.opt(self.nat)
 
+    def cash(self):
+        return {"account": self.text(), "sub": self.opt_text()}
+
+    def call_terms(self):
+        return {"placement": self.bool(), "currency": self.text(), "principal": self.nat(), "rateBps": self.nat(), "dayCount": self.p_convention(),
+                "noticeDays": self.nat(), "interestEveryDays": self.nat(), "capitalise": self.bool(), "cash": self.cash(), "start": self.nat()}
+
+    def call_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"opened": {"book": self.text(), "counterparty": self.t_counterparty(), "terms": self.call_terms(), "reference": self.text(), "trader": self.principal(),
+                               "day": self.nat(), "withinLimits": self.bool(), "approver": self.t_opt_principal()}}
+        if t == 0x02:
+            return {"funded": {"call": self.nat(), "amount": self.nat(), "day": self.nat()}}
+        if t == 0x03:
+            return {"rateReset": {"call": self.nat(), "rateBps": self.nat(), "day": self.nat(), "catchUp": self.int_()}}
+        if t == 0x04:
+            return {"balanceAdjusted": {"call": self.nat(), "delta": self.int_(), "day": self.nat(), "catchUp": self.int_()}}
+        if t == 0x05:
+            return {"noticeServed": {"call": self.nat(), "day": self.nat(), "repayDay": self.nat()}}
+        if t == 0x06:
+            return {"accrued": {"call": self.nat(), "interest": self.int_(), "day": self.nat()}}
+        if t == 0x07:
+            return {"interestSettled": {"call": self.nat(), "amount": self.nat(), "capitalised": self.bool(), "day": self.nat()}}
+        if t == 0x08:
+            return {"repaid": {"call": self.nat(), "principal": self.nat(), "interest": self.nat(), "day": self.nat()}}
+        raise ValueError(f"unknown call event tag {t:#x}")
+
     def command(self, encoding=CURRENT_COMMAND_ENCODING):
         """A command under a recorded encoding version. Version 1 is every family."""
         assert encoding in SUPPORTED_COMMAND_ENCODINGS, f"command encoding {encoding} is not one this verifier implements"
@@ -131,6 +159,18 @@ class Reader(V.Reader):
             return {"resolveEndOfDayFailure": {"book": self.text(), "businessDate": self.nat(), "item": self.nat(), "entity": self.nat(), "reason": self.text()}}
         if tag == 0x37:
             return {"clearAlert": {"alert": self.nat(), "reason": self.text()}}
+        if tag == 0x38:
+            return {"revaluePositions": {"period": self.text(), **self.dates()}}
+        if tag == 0x40:
+            return {"openCall": {"book": self.text(), "counterparty": self.t_counterparty(), "terms": self.call_terms(), "reference": self.text(), "approver": self.t_opt_principal()}}
+        if tag == 0x41:
+            return {"resetCallRate": {"call": self.nat(), "rateBps": self.nat(), **self.dates()}}
+        if tag == 0x42:
+            return {"adjustCallBalance": {"call": self.nat(), "delta": self.int_(), "approver": self.t_opt_principal(), **self.dates()}}
+        if tag == 0x43:
+            return {"serveCallNotice": {"call": self.nat()}}
+        if tag == 0x44:
+            return {"settleCall": {"call": self.nat(), **self.dates()}}
         raise ValueError(f"unknown command tag {tag:#x}")
 
     def proposed(self):
@@ -203,13 +243,15 @@ class Reader(V.Reader):
         if t == 0x21:
             return {"fixingRecorded": {"index": self.text(), "day": self.nat(), "rateBps": self.nat()}}
         if t == 0x22:
-            return {"nostroIndexFrom": {"nostro": self.text(), "journalHeight": self.nat()}}
+            return {"journalMark": {"height": self.nat()}}
         if t == 0x30:
             return {"eod": self.eod_event()}
         if t == 0x48:
             return {"alert": self.alert_event()}
         if t == 0x55:
             return {"treasury": self.treasury_event()}
+        if t == 0x60:
+            return {"call": self.call_event()}
         raise ValueError(f"unknown desk event tag {t:#x}")
 
     # ── lifted without change from Manticore's verify_bank.py at 9c0c30e ──

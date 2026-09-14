@@ -10,6 +10,7 @@
 
 import Array "mo:core/Array";
 import Blob "mo:core/Blob";
+import Int "mo:core/Int";
 import List "mo:core/List";
 import Nat "mo:core/Nat";
 import Nat8 "mo:core/Nat8";
@@ -46,6 +47,9 @@ import Can "DeskCanonical";
 import Auth "Authority";
 import Fixings "Fixings";
 import Eod "EndOfDay";
+import CallT "CallTypes";
+import CallCore "CallCore";
+import Calendar "mo:journal/Calendar";
 
 module {
 
@@ -61,6 +65,7 @@ module {
     alerts : AlertCore.State;
     eod : Eod.State;
     treasury : TreasuryCore.State;
+    calls : CallCore.State;
   };
 
   public func newState(installer : Principal) : State {
@@ -73,6 +78,7 @@ module {
       alerts = AlertCore.newState(arena);
       eod = Eod.newState();
       treasury = TreasuryCore.newState(arena);
+      calls = CallCore.newState(arena);
     }
   };
 
@@ -109,6 +115,10 @@ module {
       case (#markDeal(x)) ?x.postingDate;
       case (#resolveNostroBreak(x)) ?x.postingDate;
       case (#openEndOfDay(x)) ?x.businessDate;
+      case (#revaluePositions(x)) ?x.postingDate;
+      case (#resetCallRate(x)) ?x.postingDate;
+      case (#adjustCallBalance(x)) ?x.postingDate;
+      case (#settleCall(x)) ?x.postingDate;
       case (_) null;
     }
   };
@@ -125,9 +135,16 @@ module {
       case (#cancelDeal(x)) bookOfDeal(s, x.deal);
       case (#settleDealLeg(x)) bookOfDeal(s, x.deal);
       case (#markDeal(x)) bookOfDeal(s, x.deal);
+      case (#openCall(x)) ?x.book;
+      case (#resetCallRate(x)) bookOfCall(s, x.call);
+      case (#adjustCallBalance(x)) bookOfCall(s, x.call);
+      case (#serveCallNotice(x)) bookOfCall(s, x.call);
+      case (#settleCall(x)) bookOfCall(s, x.call);
       case (_) null;
     }
   };
+  func bookOfCall(s : State, call : Nat) : ?T.BookId { switch (CallCore.row(s.calls, call)) { case (?r) ?r.book; case null null } };
+  func balanceOfCall(s : State, call : Nat) : [(Text, Nat)] { switch (CallCore.row(s.calls, call)) { case (?r) [(r.currency, r.balance)]; case null [] } };
   func bookOfDeal(s : State, deal : Nat) : ?T.BookId { switch (TreasuryCore.row(s.treasury, deal)) { case (?r) ?r.book; case null null } };
   func notionalOfDeal(s : State, deal : Nat) : [(Text, Nat)] { switch (TreasuryCore.row(s.treasury, deal)) { case (?r) [(treasuryRowCurrency(s, r), r.notional)]; case null [] } };
   func treasuryRowCurrency(s : State, r : TreasuryCore.DealRow) : Text {
@@ -152,6 +169,10 @@ module {
       case (#settleDealLeg(x)) notionalOfDeal(s, x.deal);
       case (#markDeal(x)) notionalOfDeal(s, x.deal);
       case (#resolveNostroBreak(x)) { switch (x.correction) { case (?cr) [(cr.currency, cr.amount)]; case null [] } };
+      case (#openCall(x)) [(x.terms.currency, x.terms.principal)];
+      case (#adjustCallBalance(x)) { switch (CallCore.row(s.calls, x.call)) { case (?r) [(r.currency, Int.abs(x.delta))]; case null [] } };
+      case (#resetCallRate(x)) balanceOfCall(s, x.call);
+      case (#settleCall(x)) balanceOfCall(s, x.call);
       case (_) [];
     }
   };
@@ -178,6 +199,50 @@ module {
     let none : TT.Counterparty = { party = null; name = ""; bic = ""; lei = "" };
     switch (bb.get(id)) { case (?b) { switch (b.event) { case (#treasury(#dealCaptured(x))) x.counterparty; case (_) none } }; case null none }
   };
+  /// The counterparty and the reference of a call, from its opening block.
+  public func callOpeningOf(bb : Blocks, id : Nat) : (Text, Text, ?TT.CashAccount) {
+    switch (bb.get(id)) { case (?b) { switch (b.event) { case (#call(#opened(x))) (x.counterparty.name, x.reference, ?x.terms.cash); case (_) ("", "", null) } }; case null ("", "", null) }
+  };
+  func callErr<X>(e : CallT.Error) : Res<X> { #err(#CallError({ error = e })) };
+  func policyOf(s : State) : Res<TT.Policy> { switch (TreasuryCore.policy(s.treasury)) { case (?p) #ok(p); case null #err(#TreasuryError({ error = #NoPolicy })) } };
+  /// The desk's calendar: the journal's, with the shift to the next business day the call money's notice uses.
+  func nextBusinessDay(js : JCore.State) : Nat -> Nat {
+    switch (JCore.calendar(js)) {
+      case (?c) { let cal : Calendar.Calendar = { restDays = c.restDays; holidays = c.holidays }; func(d : Nat) : Nat { if (Calendar.isBusinessDay(cal, d)) d else Calendar.nextBusinessDay(cal, d) } };
+      case null func(d : Nat) : Nat { d };
+    }
+  };
+
+  // ─── limits across both families ───────────────────────────────────────────
+
+  /// A counterparty's exposure in a currency across a book: Manticore's treasury deals as its own limit measures
+  /// them, plus the desk's open call balances.
+  public func treasuryExposure(s : State, book : Text, cpName : Text, currency : Text) : Nat {
+    let h = TreasuryCore.hash8(cpName);
+    var total = 0;
+    for (r in TreasuryCore.openInBook(s.treasury, book).vals()) { if (r.cpHash == h and Text.equal(treasuryRowCurrency(s, r), currency)) total += (if (r.kind == 4) r.nominalLeft else r.notional) };
+    total
+  };
+  public func counterpartyExposure(s : State, book : Text, cpName : Text, currency : Text) : Nat {
+    treasuryExposure(s, book, cpName, currency) + CallCore.exposureOf(s.calls, book, cpName, currency)
+  };
+  /// The counterparty limit measured with the call balances counted, for a new act of `amount`: a breach with no
+  /// approver is a refusal; with one, the breach is recorded after the act unless Manticore's own measure records
+  /// it already (a treasury capture whose treasury-only exposure breaches records its own block).
+  func combinedLimitEvents(s : State, book : Text, cp : TT.Counterparty, currency : Text, amount : Nat, treasuryOnlyBreaches : Bool, id : Nat, approver : ?Principal, day : Nat) : Res<[T.Event]> {
+    switch (TreasuryCore.limitOf(s.treasury, book, #counterpartyExposure, currency, cp.name)) {
+      case null #ok([]);
+      case (?limit) {
+        let measured = counterpartyExposure(s, book, cp.name, currency) + amount;
+        if (measured <= limit) return #ok([]);
+        switch (approver) {
+          case null #err(#TreasuryError({ error = #LimitBreached({ kind = "counterpartyExposure"; subject = cp.name; limit; measured }) }));
+          case (?a) { if (treasuryOnlyBreaches) #ok([]) else #ok([#treasury(#limitBreached({ limit = { book; kind = #counterpartyExposure; currency; subject = cp.name; value = limit }; measured; deal = id; approver = a; day }))]) };
+        }
+      };
+    }
+  };
+
   /// The functional currency, the recorded spot rates and the position pairs of the close, the recorded fixings,
   /// the Sharia-flagged books.
   public func treasuryCtx(s : State) : Res<TreasuryCore.Ctx> {
@@ -221,6 +286,17 @@ module {
     }
   };
   func minorUnitsOf(js : JCore.State, ccy : Text) : ?Nat8 { JCore.currencyMinorUnits(js, ccy) };
+  func callPart(ev : CallT.Event) : Text {
+    switch (ev) { case (#funded(_)) "f"; case (#accrued(_)) "a"; case (#interestSettled(_)) "i"; case (#repaid(_)) "r"; case (#rateReset(_)) "reset"; case (#balanceAdjusted(_)) "adjust"; case (_) "" }
+  };
+  func callPost(js : JCore.State, journalCaller : Principal, now : Nat64, p : TT.Policy, r : CallCore.Row, cash : TT.CashAccount, ev : CallT.Event, purpose : Text, parts : [Text], postingDate : Nat, valueDate : Nat, period : Text, narration : Text) : Res<Plan> {
+    let legs = CallCore.legsOf(p, r, cash, ev);
+    if (legs.size() == 0) return only(#call(ev));
+    switch (postLegs(js, journalCaller, now, purpose, parts, legs, postingDate, valueDate, period, narration)) {
+      case (#err(e)) #err(e);
+      case (#ok(plan)) #ok({ event = ?#call(ev); extra = []; journal = plan.journal });
+    }
+  };
 
   /// An act dated into a day an end-of-day run is computing from is refused: the book for that day is closed to new
   /// history while the run is open.
@@ -347,6 +423,102 @@ module {
       case (#clearAlert(x)) {
         switch (AlertCore.planClear(s.alerts, x.alert, x.reason)) { case (#err(e)) #err(#AlertError({ error = e })); case (#ok(ev)) only(#alert(ev)) }
       };
+      // ── the revaluation: every monetary position restated at the value date's rate, one posting per currency ──
+      case (#revaluePositions(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        let ?functional = CloseCore.functional(s.close) else return #err(#NoFunctionalCurrency);
+        let events = List.empty<T.Event>();
+        let steps = List.empty<JournalStep>();
+        for (pair in CloseCore.listPairs(s.close).vals()) {
+          if (pair.monetary) {
+            let ?rate = CloseCore.rateOn(s.close, pair.currency, x.valueDate) else return #err(#MissingRate({ currency = pair.currency; asOf = x.valueDate }));
+            let pos = JCore.balance(js, pair.position, null, pair.currency);
+            let eq = JCore.balance(js, pair.equivalent, null, functional);
+            let position = if (pos.debitsPosted >= pos.creditsPosted) pos.debitsPosted - pos.creditsPosted else pos.creditsPosted - pos.debitsPosted;
+            let positionSide : JT.Side = if (pos.debitsPosted >= pos.creditsPosted) #debit else #credit;
+            let equivalent = if (eq.debitsPosted >= eq.creditsPosted) eq.debitsPosted - eq.creditsPosted else eq.creditsPosted - eq.debitsPosted;
+            switch (Fx.revalue(pair, position, positionSide, equivalent, rate, #halfEven)) {
+              case (#err(_)) return #err(#InvalidPair({ reason = "the pair for " # pair.currency # " is not monetary" }));
+              case (#ok(rev)) {
+                switch (Fx.revaluationLegs(pair, functional, rev)) {
+                  case null {};
+                  case (?legs) {
+                    switch (postLegs(js, journalCaller, now, "fx-revaluation", [x.period, pair.currency, Nat.toText(x.valueDate)], legs, x.postingDate, x.valueDate, x.period, x.narration)) {
+                      case (#err(e)) return #err(e);
+                      case (#ok(plan)) { for (st in plan.journal.vals()) List.add(steps, st) };
+                    };
+                    List.add(events, #close(#fxRevalued({ currency = pair.currency; position; equivalent; revalued = rev.revalued; movement = rev.movement; direction = rev.direction; rateNumerator = rate.numerator; rateDenominator = rate.denominator; rateAsOf = rate.asOf; day = x.valueDate })));
+                  };
+                };
+              };
+            };
+          };
+        };
+        let evs = List.toArray(events);
+        if (evs.size() == 0) return nothing();
+        #ok({ event = ?evs[0]; extra = Array.tabulate<T.Event>(evs.size() - 1, func(i) { evs[i + 1] }); journal = List.toArray(steps) })
+      };
+      // ── call and notice money ──
+      case (#openCall(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        switch (Auth.requireOpenBook(a, x.book)) { case (?e) return #err(e); case null {} };
+        if (TreasuryCore.policy(s.treasury) == null) return callErr(#NoPolicy);
+        if (Auth.isShariaBook(a, x.book)) return callErr(#ShariaBook({ book = x.book }));
+        if (Text.encodeUtf8(x.counterparty.name).size() == 0 or Text.encodeUtf8(x.counterparty.name).size() > 64) return callErr(#InvalidTerms({ reason = "the counterparty is named in 1..64 bytes" }));
+        if (Text.encodeUtf8(x.reference).size() > 64) return callErr(#InvalidTerms({ reason = "the reference is at most 64 bytes" }));
+        switch (CallCore.validateTerms(x.terms, today)) { case (?r) return callErr(#InvalidTerms({ reason = r })); case null {} };
+        switch (x.terms.cash.sub) {
+          case (?sub) { if (TreasuryCore.nostroOfAccount(s.treasury, TreasuryCore.nostroAccountHash(x.terms.cash.account, ?Posting.subledgerOf(sub), x.terms.currency)) == null) return callErr(#InvalidTerms({ reason = "the settlement account " # x.terms.cash.account # "/" # sub # " in " # x.terms.currency # " is not a registered nostro" })) };
+          case null { switch (JCore.getAccount(js, x.terms.cash.account)) { case null return #err(#UnknownAccount({ role = "call settlement"; account = x.terms.cash.account })); case (?_) {} } };
+        };
+        let extras = switch (combinedLimitEvents(s, x.book, x.counterparty, x.terms.currency, x.terms.principal, false, s.height, x.approver, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs };
+        #ok({ event = ?#call(#opened({ book = x.book; counterparty = x.counterparty; terms = x.terms; reference = x.reference; trader = authority; day = today; withinLimits = extras.size() == 0; approver = x.approver })); extra = extras; journal = [] })
+      };
+      case (#resetCallRate(x)) {
+        let p = switch (policyOf(s)) { case (#err(e)) return #err(e); case (#ok(p)) p };
+        let r = switch (CallCore.rowOpen(s.calls, x.call)) { case (#err(e)) return callErr(e); case (#ok(r)) r };
+        switch (requireNoOpenRun(s, r.book, x.valueDate)) { case (?e) return #err(e); case null {} };
+        let (_, _, cash) = callOpeningOf(bb, x.call);
+        let ?cs = cash else return callErr(#UnknownCall({ call = x.call }));
+        switch (CallCore.planReset(s.calls, x.call, x.rateBps, x.valueDate)) {
+          case (#err(e)) callErr(e);
+          case (#ok(ev)) callPost(js, journalCaller, now, p, r, cs, ev, "call-reset", [authId, Nat.toText(x.call), Nat.toText(x.valueDate)], x.postingDate, x.valueDate, x.period, x.narration);
+        }
+      };
+      case (#adjustCallBalance(x)) {
+        let p = switch (policyOf(s)) { case (#err(e)) return #err(e); case (#ok(p)) p };
+        let r = switch (CallCore.rowOpen(s.calls, x.call)) { case (#err(e)) return callErr(e); case (#ok(r)) r };
+        switch (requireNoOpenRun(s, r.book, x.valueDate)) { case (?e) return #err(e); case null {} };
+        let (cpName, _, cash) = callOpeningOf(bb, x.call);
+        let ?cs = cash else return callErr(#UnknownCall({ call = x.call }));
+        // an addition counts towards the counterparty limit like an opening; a draw never breaches
+        let extras = if (x.delta > 0) { switch (combinedLimitEvents(s, r.book, { party = null; name = cpName; bic = ""; lei = "" }, r.currency, Int.abs(x.delta), false, x.call, x.approver, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs } } else [];
+        switch (CallCore.planAdjust(s.calls, x.call, x.delta, x.valueDate)) {
+          case (#err(e)) callErr(e);
+          case (#ok(ev)) {
+            switch (callPost(js, journalCaller, now, p, r, cs, ev, "call-adjust", [authId, Nat.toText(x.call), Nat.toText(x.valueDate)], x.postingDate, x.valueDate, x.period, x.narration)) {
+              case (#err(e)) #err(e);
+              case (#ok(plan)) #ok({ plan with extra = Array.concat<T.Event>(plan.extra, extras) });
+            }
+          };
+        }
+      };
+      case (#serveCallNotice(x)) {
+        switch (CallCore.planNotice(s.calls, x.call, today, nextBusinessDay(js))) { case (#err(e)) callErr(e); case (#ok(ev)) only(#call(ev)) }
+      };
+      case (#settleCall(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        let p = switch (policyOf(s)) { case (#err(e)) return #err(e); case (#ok(p)) p };
+        let r = switch (CallCore.rowOpen(s.calls, x.call)) { case (#err(e)) return callErr(e); case (#ok(r)) r };
+        switch (requireNoOpenRun(s, r.book, x.valueDate)) { case (?e) return #err(e); case null {} };
+        let (_, _, cash) = callOpeningOf(bb, x.call);
+        let ?cs = cash else return callErr(#UnknownCall({ call = x.call }));
+        switch (CallCore.planDue(s.calls, x.call, x.valueDate)) {
+          case (#err(e)) callErr(e);
+          case (#ok(null)) nothing();
+          case (#ok(?ev)) callPost(js, journalCaller, now, p, r, cs, ev, "call-settle", [authId, Nat.toText(x.call), Nat.toText(x.valueDate), callPart(ev)], x.postingDate, x.valueDate, x.period, x.narration);
+        }
+      };
       // ── treasury: Manticore's planners with the desk's context ──
       case (#setTreasuryPolicy(pol)) {
         for (code in TreasuryCore.accountsOf(pol).vals()) { switch (JCore.getAccount(js, code)) { case null return #err(#UnknownAccount({ role = "treasury policy"; account = code })); case (?_) {} } };
@@ -364,17 +536,23 @@ module {
         switch (JCore.getAccount(js, x.nostro.account)) { case null return #err(#UnknownAccount({ role = "nostro"; account = x.nostro.account })); case (?_) {} };
         switch (TreasuryCore.planRegisterNostro(s.treasury, x.nostro, today)) {
           case (#err(e)) treasuryErr(e);
-          case (#ok(ev)) #ok({ event = ?#treasury(ev); extra = [#nostroIndexFrom({ nostro = x.nostro.id; journalHeight = JCore.height(js) })]; journal = [] });
+          // the journal mark precedes the registration in the log, so a fresh fold indexes the journal to that height
+          // before the nostro exists, exactly as the live contract did
+          case (#ok(ev)) #ok({ event = ?#journalMark({ height = JCore.height(js) }); extra = [#treasury(ev)]; journal = [] });
         }
       };
       case (#captureDeal(x)) {
         switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
         switch (Auth.requireOpenBook(a, x.book)) { case (?e) return #err(e); case null {} };
         let ctx = switch (treasuryCtx(s)) { case (#err(e)) return #err(e); case (#ok(c)) c };
+        // the counterparty limit with the call balances counted, before Manticore's own measure over its deals
+        let (dealCcy, dealAmount) : (Text, Nat) = switch (treasuryKindTotals(s, x.kind)) { case (xs) { if (xs.size() > 0) xs[0] else ("", 0) } };
+        let treasuryOnly = switch (TreasuryCore.limitOf(s.treasury, x.book, #counterpartyExposure, dealCcy, x.counterparty.name)) { case (?l) treasuryExposure(s, x.book, x.counterparty.name, dealCcy) + dealAmount > l; case null false };
+        let combined = if (dealAmount == 0) [] else { switch (combinedLimitEvents(s, x.book, x.counterparty, dealCcy, dealAmount, treasuryOnly, s.height, x.approver, today)) { case (#err(e)) return #err(e); case (#ok(xs)) xs } };
         // the trader is whose act it is; the approver on the command is the desk head who accepted a breach
         switch (TreasuryCore.planCapture(s.treasury, s.height, x.book, x.counterparty, x.kind, x.reference, authority, today, x.approver, ctx, treasuryTerms(bb))) {
           case (#err(e)) treasuryErr(e);
-          case (#ok(r)) #ok({ event = ?#treasury(r.ev); extra = Array.map<TT.TreasuryEvent, T.Event>(r.extras, func(e) { #treasury(e) }); journal = [] });
+          case (#ok(r)) #ok({ event = ?#treasury(r.ev); extra = Array.concat<T.Event>(Array.map<TT.TreasuryEvent, T.Event>(r.extras, func(e) { #treasury(e) }), combined); journal = [] });
         }
       };
       case (#confirmDeal(x)) {
@@ -432,7 +610,8 @@ module {
         };
         switch (TreasuryCore.planRecordStatement(s.treasury, x.nostro, x.statement, x.from, x.to, entries, today)) {
           case (#err(e)) treasuryErr(e);
-          case (#ok(r)) #ok({ event = ?#treasury(r.ev); extra = Array.map<TT.TreasuryEvent, T.Event>(r.breaks, func(e) { #treasury(e) }); journal = [] });
+          // the mark first: the matches and the breaks name postings the fold must have indexed before it applies them
+          case (#ok(r)) #ok({ event = ?#journalMark({ height = JCore.height(js) }); extra = Array.concat<T.Event>([#treasury(r.ev)], Array.map<TT.TreasuryEvent, T.Event>(r.breaks, func(e) { #treasury(e) })); journal = [] });
         }
       };
       case (#resolveNostroBreak(x)) {
@@ -677,9 +856,43 @@ module {
     };
   };
 
+  /// The call-money job: for every open call of the book, what falls due on the day, one act at a time and each
+  /// folded before the next is asked for: the funding, the accrual to the day, the interest settlement, the
+  /// repayment. A failure names the call and stops that call's day, nothing else.
+  func jobCalls(s : State, bb : Blocks, js : JCore.State, jb : JCore.Blocks, journalCaller : Principal, now : Nat64, acc : ChunkAcc, item : Batch.PlanItem, index : Nat, day : Nat, period : Text, book : Text, onlyCall : ?Nat) {
+    let ?p = TreasuryCore.policy(s.treasury) else { fail(acc, index, item.job, book, 0, "no treasury policy"); return };
+    for (r0 in CallCore.openInBook(s.calls, book).vals()) {
+      let mine = switch (onlyCall) { case null true; case (?e) e == r0.id };
+      if (not mine) continue;
+      acc.examined += 1;
+      let (_, _, cash) = callOpeningOf(bb, r0.id);
+      let ?cs = cash else { fail(acc, index, item.job, book, r0.id, "the call's terms are not in the log"); continue };
+      var steps = 0;
+      label acts while (steps < 8) {
+        steps += 1;
+        let ?r = CallCore.row(s.calls, r0.id) else break acts;
+        switch (CallCore.planDue(s.calls, r0.id, day)) {
+          case (#ok(null)) break acts;
+          case (#err(e)) { fail(acc, index, item.job, book, r0.id, debug_show e); break acts };
+          case (#ok(?ev)) {
+            let legs = CallCore.legsOf(p, r, cs, ev);
+            if (legs.size() > 0) {
+              if (not Posting.balances(legs)) { fail(acc, index, item.job, book, r0.id, "call: the legs do not balance"); break acts };
+              let kind = "call-" # callPart(ev);
+              let input : JT.PostingInput = { idempotencyKey = Posting.key(kind, [Nat.toText(r0.id), Nat.toText(day)]); postingDate = day; valueDate = day; period; legs; sourceRef = { kind; id = Nat.toText(r0.id) # "/" # Nat.toText(day) }; narration = kind # " " # Nat.toText(day); correctionOf = null };
+              switch (batchPost(js, jb, journalCaller, now, acc, input)) { case (?why) { fail(acc, index, item.job, book, r0.id, why); break acts }; case null {} };
+            };
+            record(acc, #call(ev));
+          };
+        };
+      };
+    };
+  };
+
   func runItem(s : State, bb : Blocks, js : JCore.State, jb : JCore.Blocks, journalCaller : Principal, now : Nat64, acc : ChunkAcc, run : Eod.Run, item : Batch.PlanItem, index : Nat, day : Nat, onlyDeal : ?Nat) {
     let ?period = periodForDay(js, day) else { acc.examined += 1; fail(acc, index, item.job, run.book, 0, "no open period contains day " # Nat.toText(day)); return };
     if (Text.equal(item.job.name, Eod.JOB_TREASURY.name)) jobTreasury(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
+    else if (Text.equal(item.job.name, Eod.JOB_CALLS.name)) jobCalls(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
     else fail(acc, index, item.job, run.book, 0, "unknown job " # item.job.name);
   };
 
@@ -749,15 +962,16 @@ module {
       case (#eod(e)) Eod.fold(s.eod, block.index, e);
       case (#alert(ae)) AlertCore.apply(s.alerts, block.index, ae);
       case (#treasury(te)) TreasuryCore.fold(s.treasury, block.index, te);
+      case (#call(ce)) CallCore.fold(s.calls, block.index, ce);
       case (_) Auth.apply(s.authority, block);
     };
     if (block.index + 1 > s.height) s.height := block.index + 1;
   };
 
   /// Rebuild the state from the two logs. The desk log is folded in order; the journal's posted blocks feed the
-  /// nostro index exactly as the live contract fed it, which is from the journal height each registration recorded:
-  /// the blocks below that height are indexed before the registration is applied, so they meet the nostros that
-  /// were registered when they were committed and no other. A block the fold cannot apply is named by a trap.
+  /// nostro index exactly as the live contract fed it: at every journal mark the blocks below the recorded height
+  /// are indexed before the act that follows is applied, so a registration meets only the postings after it and a
+  /// statement finds the legs it matched. A block the fold cannot apply is named by a trap.
   public func replay(installer : Principal, blocks : [Block], journalBlocks : [JT.Block]) : State {
     let s = newState(installer);
     var j = 0;
@@ -770,7 +984,7 @@ module {
     };
     for (b in blocks.vals()) {
       if (b.index != s.height) Runtime.trap("DeskCore.replay: block " # Nat.toText(b.index) # " out of order at height " # Nat.toText(s.height));
-      switch (b.event) { case (#nostroIndexFrom(x)) indexThrough(x.journalHeight); case (_) {} };
+      switch (b.event) { case (#journalMark(x)) indexThrough(x.height); case (_) {} };
       apply(s, b);
     };
     indexThrough(journalBlocks.size());
@@ -785,8 +999,22 @@ module {
     AlertCore.fingerprintInto(w, s.alerts);
     Eod.fingerprintInto(w, s.eod);
     TreasuryCore.fingerprintInto(w, s.treasury);
+    CallCore.fingerprintInto(w, s.calls);
   };
   public func fingerprint(s : State) : Blob { let w = JC.Writer(); fingerprintInto(w, s); KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob()) };
+  /// The fingerprint by section, so a divergence between the live state and a fresh fold names the sub-state.
+  public func fingerprintSections(s : State) : [(Text, Blob)] {
+    func one(name : Text, write : JC.Writer -> ()) : (Text, Blob) { let w = JC.Writer(); write(w); (name, KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob())) };
+    [
+      one("authority", func(w) { Auth.fingerprintInto(w, s.authority) }),
+      one("close", func(w) { CloseCore.fingerprintInto(w, s.close) }),
+      one("fixings", func(w) { Fixings.fingerprintInto(w, s.fixings) }),
+      one("alerts", func(w) { AlertCore.fingerprintInto(w, s.alerts) }),
+      one("eod", func(w) { Eod.fingerprintInto(w, s.eod) }),
+      one("treasury", func(w) { TreasuryCore.fingerprintInto(w, s.treasury) }),
+      one("calls", func(w) { CallCore.fingerprintInto(w, s.calls) }),
+    ]
+  };
 
   // ═══════════════════════════════════════════════════════
   //  VIEWS
@@ -798,6 +1026,11 @@ module {
   public func dealView(s : State, bb : Blocks, r : TreasuryCore.DealRow) : TT.DealView {
     let (cp, reference) = treasuryCaptureOf(bb, r.id);
     TreasuryCore.view(s.treasury, r, cp, reference)
+  };
+  public func callView(bb : Blocks, r : CallCore.Row) : CallT.View { let (cp, reference, _) = callOpeningOf(bb, r.id); CallCore.view(r, cp, reference) };
+  /// The positions of a book across both families: Manticore's treasury aggregation and the call money.
+  public func positions(s : State, bb : Blocks, book : Text) : [TT.PositionView] {
+    Array.concat<TT.PositionView>(TreasuryCore.positions(s.treasury, book, treasuryTerms(bb)), CallCore.positions(s.calls, book))
   };
   public func breakView(s : State, bb : Blocks, b : TreasuryCore.BreakRow, today : Nat) : TT.BreakView {
     let reference = switch (bb.get(b.id)) { case (?blk) { switch (blk.event) { case (#treasury(#nostroBreak(x))) x.reference; case (_) "" } }; case null "" };

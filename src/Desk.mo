@@ -57,6 +57,8 @@ import Auth "Authority";
 import Core "DeskCore";
 import Fixings "Fixings";
 import Eod "EndOfDay";
+import CallT "CallTypes";
+import CallCore "CallCore";
 
 shared (initMsg) persistent actor class Desk(init : {
   /// Books to open at genesis, parents before children.
@@ -375,13 +377,45 @@ shared (initMsg) persistent actor class Desk(init : {
   public query func deskProof(index : Nat) : async ?DL.Proof { DL.proof(deskLog, index) };
   public query func verifyDeskChain() : async { checked : Nat; fault : ?Text } { DL.verifyChain(deskLog, codec) };
   public query func tipCertificate() : async ?DomainCert.Certificate { DomainCert.certificate(cert, CertifiedData.getCertificate) };
+  /// Every block of a log, paged to exhaustion: a range read is bounded, and a fold that stopped at the bound would
+  /// compare a prefix and call it the state.
+  func allDeskBlocks() : [Core.Block] {
+    let out = List.empty<Core.Block>();
+    var start = 0;
+    label walk loop {
+      let pg = DL.page(deskLog, codec, start, DL.MAX_RANGE);
+      for (b in pg.blocks.vals()) List.add(out, b);
+      switch (pg.next) { case (?n) start := n; case null break walk };
+    };
+    List.toArray(out)
+  };
+  func allJournalBlocks() : [JT.Block] {
+    let out = List.empty<JT.Block>();
+    var start = 0;
+    let n = JLog.length(journalLog);
+    while (start < n) {
+      let page = JLog.getRange(journalLog, start, 1000);
+      if (page.size() == 0) Runtime.trap("Desk: the journal log returned an empty page inside its length");
+      for (b in page.vals()) List.add(out, b);
+      start += page.size();
+    };
+    List.toArray(out)
+  };
   /// The live fingerprints and the fingerprints of a fresh fold of each log, so "the state is the fold of the log"
   /// is a comparison a battery makes rather than a claim.
   public query func fingerprints() : async { deskLive : Blob; deskReplayed : Blob; journalLive : Blob; journalReplayed : Blob; deskHeight : Nat; journalHeight : Nat } {
-    let journalRange = JLog.getRange(journalLog, 0, JLog.length(journalLog));
-    let freshDesk = Core.replay(installer, DL.getRange(deskLog, codec, 0, DL.length(deskLog)), journalRange);
+    let journalRange = allJournalBlocks();
+    let freshDesk = Core.replay(installer, allDeskBlocks(), journalRange);
     let freshJournal = JCore.replay(me(), journalRange);
     { deskLive = Core.fingerprint(desk); deskReplayed = Core.fingerprint(freshDesk); journalLive = JCore.fingerprint(journal); journalReplayed = JCore.fingerprint(freshJournal); deskHeight = desk.height; journalHeight = JCore.height(journal) }
+  };
+
+  /// The fingerprint by section, live and replayed, naming the sub-state that diverges when one does.
+  public query func fingerprintSections() : async [(Text, Blob, Blob)] {
+    let fresh = Core.replay(installer, allDeskBlocks(), allJournalBlocks());
+    let live = Core.fingerprintSections(desk);
+    let replayed = Core.fingerprintSections(fresh);
+    Array.tabulate<(Text, Blob, Blob)>(live.size(), func(i) { (live[i].0, live[i].1, replayed[i].1) })
   };
 
   // ═══════════════════════════════════════════════════════
@@ -468,6 +502,45 @@ shared (initMsg) persistent actor class Desk(init : {
     if (not Auth.mayReadBook(readScope(caller), book)) return #err(#OutsideBookScope({ book }));
     #ok(TreasuryCore.positions(desk.treasury, book, Core.treasuryTerms(deskBlocks())))
   };
+  /// The positions of a book across both families: the treasury's aggregation and the call money.
+  public shared query ({ caller }) func positions(book : Text) : async Result.Result<[TT.PositionView], T.Error> {
+    if (not Auth.mayReadBook(readScope(caller), book)) return #err(#OutsideBookScope({ book }));
+    #ok(Core.positions(desk, deskBlocks(), book))
+  };
+  /// A counterparty's exposure in a currency across a book, with the call balances counted.
+  public shared query ({ caller }) func counterpartyExposure(book : Text, counterparty : Text, currency : Text) : async Result.Result<Nat, T.Error> {
+    if (not Auth.mayReadBook(readScope(caller), book)) return #err(#OutsideBookScope({ book }));
+    #ok(Core.counterpartyExposure(desk, book, counterparty, currency))
+  };
+
+  // ── call and notice money ──
+  func callViewOf(caller : Principal, id : Nat) : Result.Result<?CallT.View, T.Error> {
+    switch (CallCore.row(desk.calls, id)) {
+      case null #ok(null);
+      case (?r) { if (not Auth.mayReadBook(readScope(caller), r.book)) return #err(#OutsideBookScope({ book = r.book })); #ok(?Core.callView(deskBlocks(), r)) };
+    }
+  };
+  public shared query ({ caller }) func call(id : Nat) : async Result.Result<?CallT.View, T.Error> { callViewOf(caller, id) };
+  public shared query ({ caller }) func callTerms(id : Nat) : async Result.Result<?CallT.Terms, T.Error> {
+    switch (callViewOf(caller, id)) {
+      case (#err(e)) #err(e);
+      case (#ok(null)) #ok(null);
+      case (#ok(?_)) { switch (deskBlock(id)) { case (?b) { switch (b.event) { case (#call(#opened(x))) #ok(?x.terms); case (_) #ok(null) } }; case null #ok(null) } };
+    }
+  };
+  public shared query ({ caller }) func callsOfBook(book : Text) : async Result.Result<[CallT.View], T.Error> {
+    if (not Auth.mayReadBook(readScope(caller), book)) return #err(#OutsideBookScope({ book }));
+    #ok(Array.map<CallCore.Row, CallT.View>(CallCore.callsOfBook(desk.calls, book), func(r) { Core.callView(deskBlocks(), r) }))
+  };
+  public shared query ({ caller }) func callsOfCounterparty(name : Text, cursor : ?Blob, limit : Nat) : async { entries : [CallT.View]; cursor : ?Blob } {
+    let pg = CallCore.listByCounterparty(desk.calls, name, cursor, limit);
+    let out = List.empty<CallT.View>();
+    for (id in pg.ids.vals()) { switch (callViewOf(caller, id)) { case (#ok(?v)) List.add(out, v); case (_) {} } };
+    { entries = List.toArray(out); cursor = pg.cursor }
+  };
+  /// The interest a call has earned or owed to a day, by the row's base and rate: what the next accrual will post.
+  public query func callAccrualTo(id : Nat, day : Nat) : async ?Int { switch (CallCore.row(desk.calls, id)) { case (?r) ?CallCore.accrualTarget(r, day); case null null } };
+  public query func callStatus() : async { opened : Nat; open : Nat; interestTotal : Int } { CallCore.status(desk.calls) };
   public shared query ({ caller }) func treasuryLots(book : Text, isin : Text) : async Result.Result<[TT.DealView], T.Error> {
     if (not Auth.mayReadBook(readScope(caller), book)) return #err(#OutsideBookScope({ book }));
     #ok(Array.map<TreasuryCore.DealRow, TT.DealView>(TreasuryCore.lotsOf(desk.treasury, book, isin), func(r) { Core.dealView(desk, deskBlocks(), r) }))

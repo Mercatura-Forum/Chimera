@@ -12,6 +12,8 @@ import Principal "mo:core/Principal";
 import Freeze "mo:kernel/domain/Freeze";
 import TT "mo:manticore/TreasuryTypes";
 
+import CallT "../../src/CallTypes";
+
 import T "../../src/DeskTypes";
 import Can "../../src/DeskCanonical";
 
@@ -34,8 +36,16 @@ module {
   public let mm : TT.MoneyMarket = { placement = true; currency = "USD"; principal = 1_000_000_00; rateBps = 450; dayCount = #a003_Act360; start = 20670; maturity = 20700; cash = nostro };
   public let security : TT.SecurityTrade = { isin = "EG0000012345"; direction = #buy; nominal = 10_000_000_00; priceMicro = 98_500_000; settlement = 20672; classification = #fvoci; cash; priceCurve = "EG0000012345"; venue = ?"EGX" };
 
+  public let callTerms : CallT.Terms = { placement = true; currency = "USD"; principal = 750_000_00; rateBps = 430; dayCount = #a003_Act360; noticeDays = 7; interestEveryDays = 30; capitalise = false; cash = nostro; start = 20670 };
+
   public func samples() : [Freeze.Sample<T.Command>] {
     [
+      { family = "revaluePositions"; command = #revaluePositions({ period = "2026-08"; postingDate = 20700; valueDate = 20700; narration = "month end" }) },
+      { family = "openCall"; command = #openCall({ book = "BR01"; counterparty = citi; terms = callTerms; reference = "call-1"; approver = null }) },
+      { family = "resetCallRate"; command = #resetCallRate({ call = 50; rateBps = 450; postingDate = 20680; valueDate = 20680; period = "2026-08"; narration = "reset" }) },
+      { family = "adjustCallBalance"; command = #adjustCallBalance({ call = 50; delta = -250_000_00; approver = null; postingDate = 20685; valueDate = 20685; period = "2026-08"; narration = "draw" }) },
+      { family = "serveCallNotice"; command = #serveCallNotice({ call = 50 }) },
+      { family = "settleCall"; command = #settleCall({ call = 50; postingDate = 20700; valueDate = 20700; period = "2026-08"; narration = "repay" }) },
       { family = "openBook"; command = #openBook({ id = "BR01"; name = "Desk 1"; parent = ?"HQ"; sharia = false }) },
       { family = "closeBook"; command = #closeBook({ id = "BR01" }) },
       { family = "defineRole"; command = #defineRole({ id = "trader"; name = "Trader"; permissions = ["command.perform", "treasury.deal.capture"] }) },
@@ -103,7 +113,7 @@ module {
       #dailyConsumed({ subject = alice(); currency = "USD"; day = 20670; amount = 500_000_00 }),
       #close(#fxRateSet({ rate = { currency = "USD"; functional = "EGP"; numerator = 48_000_000; denominator = 1_000_000; asOf = 20670; source = "CBE reference" } })),
       #fixingRecorded({ index = "CBE-ON"; day = 20670; rateBps = 2000 }),
-      #nostroIndexFrom({ nostro = "NOSTRO-USD-CITI"; journalHeight = 31 }),
+      #journalMark({ height = 31 }),
       #eod(#opened({ book = "BR01"; businessDate = 20670; shardSize = 8; openedAtHeight = 40; maxDeal = 39; planHash = h(6); items = 1; entities = 1 })),
       #eod(#chunk({ book = "BR01"; businessDate = 20670; cursorFrom = 0; cursorTo = 1; posted = 12; examined = 26; zeroMovement = 0; failures = [{ seq = 0; job = "treasury"; scope = "BR01"; entity = 44; reason = "NoRate"; attempts = 1 }] })),
       #eod(#retry({ book = "BR01"; businessDate = 20671; resolved = [{ item = 0; entity = 44 }]; failures = []; posted = 1 })),
@@ -115,6 +125,15 @@ module {
       #treasury(#dealCaptured({ book = "BR01"; counterparty = citi; kind = #security(security); reference = "security-1"; trader = alice(); day = 20670; withinLimits = true; approver = null; secondAmount = 985_000_000 })),
       #treasury(#legSettled({ deal = 40; leg = 0; amount = 1; currency = "USD"; realised = -5; day = 20670; accrual = 0; amortisation = 0; fv = 0; nominal = 0; cost = 0 })),
       #treasury(#nostroBreak({ nostro = "NOSTRO-USD-CITI"; statement = h(3); side = #onStatementOnly; amount = 45_00; credit = false; valueDay = 20665; reference = "FEE"; posting = null; day = 20670 })),
+      #close(#fxRevalued({ currency = "USD"; position = 500_000_00; equivalent = 24_000_000_00; revalued = 24_050_000_00; movement = 50_000_00; direction = #gain; rateNumerator = 48_100_000; rateDenominator = 1_000_000; rateAsOf = 20700; day = 20700 })),
+      #call(#opened({ book = "BR01"; counterparty = citi; terms = callTerms; reference = "call-1"; trader = alice(); day = 20670; withinLimits = true; approver = null })),
+      #call(#funded({ call = 50; amount = 750_000_00; day = 20670 })),
+      #call(#rateReset({ call = 50; rateBps = 450; day = 20680; catchUp = 89_583 })),
+      #call(#balanceAdjusted({ call = 50; delta = -250_000_00; day = 20685; catchUp = 46_875 })),
+      #call(#noticeServed({ call = 50; day = 20690; repayDay = 20697 })),
+      #call(#accrued({ call = 50; interest = 6_250; day = 20691 })),
+      #call(#interestSettled({ call = 50; amount = 150_000; capitalised = false; day = 20700 })),
+      #call(#repaid({ call = 50; principal = 500_000_00; interest = 41_667; day = 20697 })),
     ]
   };
 }

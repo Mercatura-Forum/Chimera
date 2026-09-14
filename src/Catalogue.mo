@@ -65,6 +65,14 @@ module {
       p("eod.failure.resolve", "eod", #update, #command("resolveEndOfDayFailure"), false, true),
       // ── alerts ──
       p("alert.clear", "alert", #update, #command("clearAlert"), false, true),
+      // ── the revaluation ──
+      p("fx.revalue", "fx", #update, #command("revaluePositions"), true, true),
+      // ── call and notice money: the opening the trader's own act within the ceiling, the rest dual ──
+      p("call.open", "call", #create, #command("openCall"), false, false),
+      p("call.rate.reset", "call", #update, #command("resetCallRate"), true, true),
+      p("call.balance.adjust", "call", #update, #command("adjustCallBalance"), true, true),
+      p("call.notice.serve", "call", #update, #command("serveCallNotice"), false, true),
+      p("call.settle", "call", #update, #command("settleCall"), true, true),
       // ── treasury (Manticore's rows, verbatim) ──
       p("treasury.policy", "treasury", #update, #command("setTreasuryPolicy"), false, true),
       p("treasury.security.register", "treasury", #create, #command("registerSecurity"), false, true),
@@ -111,6 +119,12 @@ module {
       case (#setRetryPolicy(_)) "setRetryPolicy";
       case (#resolveEndOfDayFailure(_)) "resolveEndOfDayFailure";
       case (#clearAlert(_)) "clearAlert";
+      case (#revaluePositions(_)) "revaluePositions";
+      case (#openCall(_)) "openCall";
+      case (#resetCallRate(_)) "resetCallRate";
+      case (#adjustCallBalance(_)) "adjustCallBalance";
+      case (#serveCallNotice(_)) "serveCallNotice";
+      case (#settleCall(_)) "settleCall";
       case (#setTreasuryPolicy(_)) "setTreasuryPolicy";
       case (#registerSecurity(_)) "registerSecurity";
       case (#publishCurve(_)) "publishCurve";
@@ -135,6 +149,7 @@ module {
       "journalRollBusinessDate", "journalSetActivationHeight",
       "setFunctionalCurrency", "setFxPair", "setFxRate", "recordRateFixing",
       "openEndOfDay", "setRetryPolicy", "resolveEndOfDayFailure", "clearAlert",
+      "revaluePositions", "openCall", "resetCallRate", "adjustCallBalance", "serveCallNotice", "settleCall",
       "setTreasuryPolicy", "registerSecurity", "publishCurve", "setTreasuryLimit", "registerNostro", "captureDeal", "confirmDeal", "amendDeal", "cancelDeal",
       "settleDealLeg", "markDeal", "recordNostroStatement", "resolveNostroBreak",
     ]

@@ -8,6 +8,12 @@ import Freeze "mo:kernel/domain/Freeze";
 module {
   public func vectors() : [Freeze.Vector] {
     [
+      { family = "revaluePositions"; version = 1; hex = "ce510c9518df7f08d575b2454a63e588e0ef1fd6aa81c2809c3a8061eae81816" },
+      { family = "openCall"; version = 1; hex = "4664ba44afd446fdb3d81c7d041ac450374fd82b3833e0416239e8f3a6b72b41" },
+      { family = "resetCallRate"; version = 1; hex = "c9fa8753cf29b9850384582be47a99ab01ccd0bb3b0f2ce5ec4998c538c34744" },
+      { family = "adjustCallBalance"; version = 1; hex = "1eebdc244790718d447dd3e6a1da550e8682c2c55101600806714b5da1a6beec" },
+      { family = "serveCallNotice"; version = 1; hex = "c895b6440e1ad97392c3e39353d6b6a6972b434998792456038cb0acab8c35a7" },
+      { family = "settleCall"; version = 1; hex = "df6503f753fc1334cf38f3d101bb92075e2e5edbffa4390cfbc325b46ede4ab7" },
       { family = "openBook"; version = 1; hex = "7325e59cc2e5da28b842d079c65a2c1eaedafb85fa5521b5fed9372509973c8a" },
       { family = "closeBook"; version = 1; hex = "1385d33090d01917905e92687916faa5692f85ff0829596c911d6091f4b603c0" },
       { family = "defineRole"; version = 1; hex = "b86e7237d16e2f9f477d8a325e7050ebb7339717e5fbbca1a5deab92b39bfb7c" },
