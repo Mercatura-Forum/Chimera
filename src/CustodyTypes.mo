@@ -72,6 +72,15 @@ module {
     /// realised result), or nothing for a cash distribution.
     #entitlementPaid : { action : ActionId; lot : TT.DealId; amount : Nat; nominal : Nat; realised : Int; day : Day };
     #paid : { action : ActionId; lots : Nat; total : Nat; day : Day };
+    /// A lot's holding pledged as collateral or lent out: the depot still holds it, but it is not available to a
+    /// sale or a transfer until released or returned.
+    #pledged : { lot : TT.DealId; depot : Text; nominal : Nat; reference : Text; day : Day };
+    #released : { lot : TT.DealId; depot : Text; nominal : Nat; reference : Text; day : Day };
+    #lent : { lot : TT.DealId; depot : Text; nominal : Nat; reference : Text; day : Day };
+    #lentReturned : { lot : TT.DealId; depot : Text; nominal : Nat; reference : Text; day : Day };
+    /// Collateral received from a counterparty and held in a depot: never a lot of the desk's own.
+    #collateralReceived : { isin : Text; depot : Text; nominal : Nat; reference : Text; day : Day };
+    #collateralReturned : { isin : Text; depot : Text; nominal : Nat; reference : Text; day : Day };
   };
 
   public type Error = {
@@ -92,4 +101,5 @@ module {
   public type ActionView = { id : ActionId; isin : Text; kind : Text; recordDate : Day; exDate : Day; paymentDate : Day; state : Text; lots : Nat; entitled : Nat; paid : Nat; lastBlock : Nat };
   public type EntitlementView = { action : ActionId; lot : TT.DealId; depot : Text; nominal : Nat; amount : Nat; basis : Text; claimed : Bool; paid : Bool };
   public type Status = { instruments : Nat; depots : Nat; holdings : Nat; actions : Nat; entitlements : Nat; transfers : Nat };
+  public type AvailableView = { depot : Text; isin : Text; held : Nat; encumbered : Nat; available : Nat; received : Nat };
 }

@@ -25,6 +25,10 @@ module {
   public type LedgerRole = { #cash : { currency : Text }; #security : { isin : Text } };
   public type LedgerDeclaration = { role : LedgerRole; ledger : Principal; partial : Bool };
 
+  /// What an instruction settles: a treasury deal's delivery leg, a repo's start (0) or close (1) leg, a loan's
+  /// start (0) or return (1) leg.
+  public type Family = { #treasury; #repo; #loan };
+  public func familyText(f : Family) : Text { switch (f) { case (#treasury) "treasury"; case (#repo) "repo"; case (#loan) "loan" } };
   public type Role = { #maker; #taker };
   public func roleText(r : Role) : Text { switch (r) { case (#maker) "maker"; case (#taker) "taker" } };
 
@@ -40,7 +44,7 @@ module {
   };
 
   public type Instruction = {
-    deal : TT.DealId; leg : Nat; cycle : Day; role : Role; counterparty : Principal;
+    family : Family; deal : Nat; leg : Nat; cycle : Day; role : Role; counterparty : Principal;
     assetLedger : Principal; assetAmount : Nat; cashLedger : Principal; cashAmount : Nat;
     /// The Tachyon trade the counterparty opened, for a purchase; a sale's trade id is the desk's own opening.
     tradeId : ?Nat; reference : Text; documentHash : Blob;
@@ -102,7 +106,7 @@ module {
   };
 
   public type InstructionView = {
-    id : InstructionId; deal : TT.DealId; leg : Nat; cycle : Day; role : Text; counterparty : Principal;
+    id : InstructionId; family : Text; deal : Nat; leg : Nat; cycle : Day; role : Text; counterparty : Principal;
     assetLedger : Principal; assetAmount : Nat; cashLedger : Principal; cashAmount : Nat; tradeId : ?Nat;
     state : Text; fails : Nat; reference : Text; lastBlock : Nat;
   };

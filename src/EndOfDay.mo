@@ -33,6 +33,9 @@ module {
   public let JOB_CUSTODY : Batch.Job = { name = "custody"; rank = 3 };
   /// The settlement job, last: the cycle of the day closed, the instructions it did not settle failed and recycled.
   public let JOB_SETTLEMENT : Batch.Job = { name = "settlement"; rank = 4 };
+  /// The financing job: the repos and loans started on their day, accrued to the day, the collateral marked and
+  /// margin called, the term repos closed at maturity, the loans returned on their day.
+  public let JOB_FINANCING : Batch.Job = { name = "financing"; rank = 5 };
 
   public type Run = {
     book : Text;
@@ -108,7 +111,7 @@ module {
   /// The plan of a book's end of day: one per-scope item for the treasury job, which walks the open deals of the
   /// book itself. A pure function of the book and the shard size, so the recorded hash re-derives at every advance.
   public func planInput(book : Text, shardSize : Nat) : Batch.Input {
-    { scopes = [{ scope = book; qualifier = ""; entities = 0; jobs = [JOB_TREASURY, JOB_CALLS, JOB_CUSTODY, JOB_SETTLEMENT] }]; shardSize }
+    { scopes = [{ scope = book; qualifier = ""; entities = 0; jobs = [JOB_TREASURY, JOB_CALLS, JOB_CUSTODY, JOB_SETTLEMENT, JOB_FINANCING] }]; shardSize }
   };
 
   func mustRun(s : State, book : Text, day : Nat) : Run {

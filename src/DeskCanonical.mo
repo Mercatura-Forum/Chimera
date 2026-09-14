@@ -37,6 +37,7 @@ import PC "mo:manticore/ProductCanonical";
 import CallT "CallTypes";
 import CuT "CustodyTypes";
 import ST "SettlementTypes";
+import FT "FinancingTypes";
 
 import T "DeskTypes";
 
@@ -173,6 +174,12 @@ module {
       case (#entitlementPaid(x)) { w.byte(0x0B); w.nat(x.action); w.nat(x.lot); w.nat(x.amount); w.nat(x.nominal); wInt(w, x.realised); w.nat(x.day) };
       case (#paid(x)) { w.byte(0x0C); w.nat(x.action); w.nat(x.lots); w.nat(x.total); w.nat(x.day) };
       case (#entitlementClaimed(x)) { w.byte(0x0D); w.nat(x.action); w.nat(x.lot); w.nat(x.amount); wInt(w, x.accrued); w.nat(x.day) };
+      case (#pledged(x)) { w.byte(0x0E); w.nat(x.lot); w.text(x.depot); w.nat(x.nominal); w.text(x.reference); w.nat(x.day) };
+      case (#released(x)) { w.byte(0x0F); w.nat(x.lot); w.text(x.depot); w.nat(x.nominal); w.text(x.reference); w.nat(x.day) };
+      case (#lent(x)) { w.byte(0x10); w.nat(x.lot); w.text(x.depot); w.nat(x.nominal); w.text(x.reference); w.nat(x.day) };
+      case (#lentReturned(x)) { w.byte(0x11); w.nat(x.lot); w.text(x.depot); w.nat(x.nominal); w.text(x.reference); w.nat(x.day) };
+      case (#collateralReceived(x)) { w.byte(0x12); w.text(x.isin); w.text(x.depot); w.nat(x.nominal); w.text(x.reference); w.nat(x.day) };
+      case (#collateralReturned(x)) { w.byte(0x13); w.text(x.isin); w.text(x.depot); w.nat(x.nominal); w.text(x.reference); w.nat(x.day) };
     }
   };
   func rCustodyEvent(r : JC.Reader) : ?CuT.Event {
@@ -194,6 +201,12 @@ module {
       case (?0x0B) { let ?action = r.nat() else return null; let ?lot = r.nat() else return null; let ?amount = r.nat() else return null; let ?nominal = r.nat() else return null; let ?realised = rInt(r) else return null; let ?day = r.nat() else return null; ?#entitlementPaid({ action; lot; amount; nominal; realised; day }) };
       case (?0x0C) { let ?action = r.nat() else return null; let ?lots = r.nat() else return null; let ?total = r.nat() else return null; let ?day = r.nat() else return null; ?#paid({ action; lots; total; day }) };
       case (?0x0D) { let ?action = r.nat() else return null; let ?lot = r.nat() else return null; let ?amount = r.nat() else return null; let ?accrued = rInt(r) else return null; let ?day = r.nat() else return null; ?#entitlementClaimed({ action; lot; amount; accrued; day }) };
+      case (?0x0E) { let ?lot = r.nat() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; let ?day = r.nat() else return null; ?#pledged({ lot; depot; nominal; reference; day }) };
+      case (?0x0F) { let ?lot = r.nat() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; let ?day = r.nat() else return null; ?#released({ lot; depot; nominal; reference; day }) };
+      case (?0x10) { let ?lot = r.nat() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; let ?day = r.nat() else return null; ?#lent({ lot; depot; nominal; reference; day }) };
+      case (?0x11) { let ?lot = r.nat() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; let ?day = r.nat() else return null; ?#lentReturned({ lot; depot; nominal; reference; day }) };
+      case (?0x12) { let ?isin = r.text() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; let ?day = r.nat() else return null; ?#collateralReceived({ isin; depot; nominal; reference; day }) };
+      case (?0x13) { let ?isin = r.text() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; let ?day = r.nat() else return null; ?#collateralReturned({ isin; depot; nominal; reference; day }) };
       case (_) null;
     }
   };
@@ -209,15 +222,102 @@ module {
   func rCycle(r : JC.Reader) : ?ST.Cycle { let ?businessDate = r.nat() else return null; let ?market = r.text() else return null; let ?priceSource = r.text() else return null; ?{ businessDate; market; priceSource } };
   func wRole(w : JC.Writer, x : ST.Role) { w.byte(switch (x) { case (#maker) 1; case (#taker) 2 }) };
   func rRole(r : JC.Reader) : ?ST.Role { switch (r.byte()) { case (?1) ?#maker; case (?2) ?#taker; case (_) null } };
+  func wFamily(w : JC.Writer, f : ST.Family) { w.byte(switch (f) { case (#treasury) 0; case (#repo) 1; case (#loan) 2 }) };
+  func rFamily(r : JC.Reader) : ?ST.Family { switch (r.byte()) { case (?0) ?#treasury; case (?1) ?#repo; case (?2) ?#loan; case (_) null } };
   func wInstruction(w : JC.Writer, i : ST.Instruction) {
-    w.nat(i.deal); w.nat(i.leg); w.nat(i.cycle); wRole(w, i.role); w.principal(i.counterparty); w.principal(i.assetLedger); w.nat(i.assetAmount); w.principal(i.cashLedger); w.nat(i.cashAmount);
+    wFamily(w, i.family); w.nat(i.deal); w.nat(i.leg); w.nat(i.cycle); wRole(w, i.role); w.principal(i.counterparty); w.principal(i.assetLedger); w.nat(i.assetAmount); w.principal(i.cashLedger); w.nat(i.cashAmount);
     w.optNat(i.tradeId); w.text(i.reference); w.blob(i.documentHash);
   };
   func rInstruction(r : JC.Reader) : ?ST.Instruction {
-    let ?deal = r.nat() else return null; let ?leg = r.nat() else return null; let ?cycle = r.nat() else return null; let ?role = rRole(r) else return null; let ?counterparty = r.principal() else return null;
+    let ?family = rFamily(r) else return null; let ?deal = r.nat() else return null; let ?leg = r.nat() else return null; let ?cycle = r.nat() else return null; let ?role = rRole(r) else return null; let ?counterparty = r.principal() else return null;
     let ?assetLedger = r.principal() else return null; let ?assetAmount = r.nat() else return null; let ?cashLedger = r.principal() else return null; let ?cashAmount = r.nat() else return null;
     let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; let ?documentHash = r.blob() else return null;
-    ?{ deal; leg; cycle; role; counterparty; assetLedger; assetAmount; cashLedger; cashAmount; tradeId; reference; documentHash }
+    ?{ family; deal; leg; cycle; role; counterparty; assetLedger; assetAmount; cashLedger; cashAmount; tradeId; reference; documentHash }
+  };
+  // ─── financing ───
+  func wCollateral(w : JC.Writer, c : FT.Collateral) { w.text(c.isin); w.nat(c.nominal) };
+  func rCollateral(r : JC.Reader) : ?FT.Collateral { let ?isin = r.text() else return null; let ?nominal = r.nat() else return null; ?{ isin; nominal } };
+  func wOptCollateral(w : JC.Writer, c : ?FT.Collateral) { switch (c) { case null w.byte(0); case (?x) { w.byte(1); wCollateral(w, x) } } };
+  func rOptCollateral(r : JC.Reader) : ??FT.Collateral { switch (r.byte()) { case (?0) ?null; case (?1) { let ?c = rCollateral(r) else return null; ??c }; case (_) null } };
+  func wLots(w : JC.Writer, xs : [(Nat, Nat)]) { w.nat(xs.size()); for ((a, b) in xs.vals()) { w.nat(a); w.nat(b) } };
+  func rLots(r : JC.Reader) : ?[(Nat, Nat)] { let ?n = r.nat() else return null; if (n > 10_000) return null; let out = List.empty<(Nat, Nat)>(); var i = 0; while (i < n) { let ?a = r.nat() else return null; let ?b = r.nat() else return null; List.add(out, (a, b)); i += 1 }; ?List.toArray(out) };
+  func wFinancingPolicy(w : JC.Writer, p : FT.Policy) {
+    for (a in [p.repoPayable, p.reverseRepoReceivable, p.repoInterestPayable, p.repoInterestReceivable, p.repoInterestExpense, p.repoInterestIncome, p.marginCashGiven, p.marginCashReceived, p.lendingFeeReceivable, p.lendingFeeIncome, p.cashCollateralPayable, p.rebateExpense, p.manufacturedPaymentReceivable].vals()) w.text(a);
+    w.nat(p.marginGraceDays);
+  };
+  func rFinancingPolicy(r : JC.Reader) : ?FT.Policy {
+    let ?repoPayable = r.text() else return null; let ?reverseRepoReceivable = r.text() else return null; let ?repoInterestPayable = r.text() else return null; let ?repoInterestReceivable = r.text() else return null;
+    let ?repoInterestExpense = r.text() else return null; let ?repoInterestIncome = r.text() else return null; let ?marginCashGiven = r.text() else return null; let ?marginCashReceived = r.text() else return null;
+    let ?lendingFeeReceivable = r.text() else return null; let ?lendingFeeIncome = r.text() else return null; let ?cashCollateralPayable = r.text() else return null; let ?rebateExpense = r.text() else return null;
+    let ?manufacturedPaymentReceivable = r.text() else return null; let ?marginGraceDays = r.nat() else return null;
+    ?{ repoPayable; reverseRepoReceivable; repoInterestPayable; repoInterestReceivable; repoInterestExpense; repoInterestIncome; marginCashGiven; marginCashReceived; lendingFeeReceivable; lendingFeeIncome; cashCollateralPayable; rebateExpense; manufacturedPaymentReceivable; marginGraceDays }
+  };
+  func wRepoTerms(w : JC.Writer, t : FT.RepoTerms) {
+    w.bool(t.reverse); w.text(t.currency); w.nat(t.cash); w.nat(t.rateBps); PC.wConvention(w, t.dayCount); w.nat(t.start); w.optNat(t.maturity); wCollateral(w, t.collateral); w.nat(t.haircutBps); w.nat(t.thresholdBps); wCash(w, t.cashAccount); w.text(t.depot);
+  };
+  func rRepoTerms(r : JC.Reader) : ?FT.RepoTerms {
+    let ?reverse = r.bool() else return null; let ?currency = r.text() else return null; let ?cash = r.nat() else return null; let ?rateBps = r.nat() else return null; let ?dayCount = PC.rConvention(r) else return null;
+    let ?start = r.nat() else return null; let ?maturity = r.optNat() else return null; let ?collateral = rCollateral(r) else return null; let ?haircutBps = r.nat() else return null; let ?thresholdBps = r.nat() else return null;
+    let ?cashAccount = rCash(r) else return null; let ?depot = r.text() else return null;
+    ?{ reverse; currency; cash; rateBps; dayCount; start; maturity; collateral; haircutBps; thresholdBps; cashAccount; depot }
+  };
+  func wLoanTerms(w : JC.Writer, t : FT.LoanTerms) {
+    w.text(t.isin); w.nat(t.nominal); w.text(t.currency); w.nat(t.valueMicro); w.nat(t.feeBps); PC.wConvention(w, t.dayCount);
+    switch (t.collateral) { case (#cash(c)) { w.byte(1); w.nat(c.amount); w.nat(c.rebateBps) }; case (#securities(c)) { w.byte(2); wCollateral(w, c) } };
+    w.nat(t.start); w.nat(t.noticeDays); wCash(w, t.cashAccount); w.text(t.depot);
+  };
+  func rLoanTerms(r : JC.Reader) : ?FT.LoanTerms {
+    let ?isin = r.text() else return null; let ?nominal = r.nat() else return null; let ?currency = r.text() else return null; let ?valueMicro = r.nat() else return null; let ?feeBps = r.nat() else return null; let ?dayCount = PC.rConvention(r) else return null;
+    let collateral : FT.LoanCollateral = switch (r.byte()) {
+      case (?1) { let ?amount = r.nat() else return null; let ?rebateBps = r.nat() else return null; #cash({ amount; rebateBps }) };
+      case (?2) { let ?c = rCollateral(r) else return null; #securities(c) };
+      case (_) return null;
+    };
+    let ?start = r.nat() else return null; let ?noticeDays = r.nat() else return null; let ?cashAccount = rCash(r) else return null; let ?depot = r.text() else return null;
+    ?{ isin; nominal; currency; valueMicro; feeBps; dayCount; collateral; start; noticeDays; cashAccount; depot }
+  };
+  func wPayer(w : JC.Writer, p : FT.MarginPayer) { w.byte(switch (p) { case (#desk) 1; case (#counterparty) 2 }) };
+  func rPayer(r : JC.Reader) : ?FT.MarginPayer { switch (r.byte()) { case (?1) ?#desk; case (?2) ?#counterparty; case (_) null } };
+  func wFinancingEvent(w : JC.Writer, e : FT.Event) {
+    switch (e) {
+      case (#policySet(p)) { w.byte(0x01); wFinancingPolicy(w, p) };
+      case (#repoOpened(x)) { w.byte(0x02); w.text(x.book); TyCan.writeCounterparty(w, x.counterparty); wRepoTerms(w, x.terms); w.text(x.reference); w.principal(x.trader); w.nat(x.day) };
+      case (#repoStarted(x)) { w.byte(0x03); w.nat(x.repo); wLots(w, x.lots); w.nat(x.day) };
+      case (#repoAccrued(x)) { w.byte(0x04); w.nat(x.repo); wInt(w, x.interest); w.nat(x.day) };
+      case (#repoRateReset(x)) { w.byte(0x05); w.nat(x.repo); w.nat(x.rateBps); w.nat(x.day); wInt(w, x.catchUp) };
+      case (#collateralMarked(x)) { w.byte(0x06); w.nat(x.repo); w.nat(x.value); w.nat(x.exposure); w.nat(x.priceMicro); w.nat(x.day) };
+      case (#marginCallRaised(x)) { w.byte(0x07); w.nat(x.repo); w.nat(x.amount); wPayer(w, x.payer); w.nat(x.day); w.nat(x.due) };
+      case (#marginMet(x)) { w.byte(0x08); w.nat(x.repo); w.nat(x.cash); wOptCollateral(w, x.collateral); wLots(w, x.lots); wPayer(w, x.payer); w.nat(x.day) };
+      case (#collateralSubstituted(x)) { w.byte(0x09); w.nat(x.repo); wCollateral(w, x.out); wCollateral(w, x.in_); wLots(w, x.outLots); wLots(w, x.inLots); w.nat(x.day) };
+      case (#repoClosed(x)) { w.byte(0x0A); w.nat(x.repo); w.nat(x.principal); w.nat(x.interest); wInt(w, x.marginReturned); w.nat(x.day) };
+      case (#loanOpened(x)) { w.byte(0x0B); w.text(x.book); TyCan.writeCounterparty(w, x.counterparty); wLoanTerms(w, x.terms); w.text(x.reference); w.principal(x.trader); w.nat(x.day) };
+      case (#loanStarted(x)) { w.byte(0x0C); w.nat(x.loan); wLots(w, x.lots); w.nat(x.day) };
+      case (#loanAccrued(x)) { w.byte(0x0D); w.nat(x.loan); wInt(w, x.fee); wInt(w, x.rebate); w.nat(x.day) };
+      case (#loanRecalled(x)) { w.byte(0x0E); w.nat(x.loan); w.nat(x.day); w.nat(x.returnDay) };
+      case (#loanReturned(x)) { w.byte(0x0F); w.nat(x.loan); w.nat(x.fee); w.nat(x.rebate); w.nat(x.day) };
+      case (#manufacturedPayment(x)) { w.byte(0x10); w.nat(x.loan); w.nat(x.action); w.nat(x.lot); w.nat(x.amount); w.nat(x.day) };
+    }
+  };
+  func rFinancingEvent(r : JC.Reader) : ?FT.Event {
+    switch (r.byte()) {
+      case (?0x01) { let ?p = rFinancingPolicy(r) else return null; ?#policySet(p) };
+      case (?0x02) { let ?book = r.text() else return null; let ?counterparty = TyCan.readCounterparty(r) else return null; let ?terms = rRepoTerms(r) else return null; let ?reference = r.text() else return null; let ?trader = r.principal() else return null; let ?day = r.nat() else return null; ?#repoOpened({ book; counterparty; terms; reference; trader; day }) };
+      case (?0x03) { let ?repo = r.nat() else return null; let ?lots = rLots(r) else return null; let ?day = r.nat() else return null; ?#repoStarted({ repo; lots; day }) };
+      case (?0x04) { let ?repo = r.nat() else return null; let ?interest = rInt(r) else return null; let ?day = r.nat() else return null; ?#repoAccrued({ repo; interest; day }) };
+      case (?0x05) { let ?repo = r.nat() else return null; let ?rateBps = r.nat() else return null; let ?day = r.nat() else return null; let ?catchUp = rInt(r) else return null; ?#repoRateReset({ repo; rateBps; day; catchUp }) };
+      case (?0x06) { let ?repo = r.nat() else return null; let ?value = r.nat() else return null; let ?exposure = r.nat() else return null; let ?priceMicro = r.nat() else return null; let ?day = r.nat() else return null; ?#collateralMarked({ repo; value; exposure; priceMicro; day }) };
+      case (?0x07) { let ?repo = r.nat() else return null; let ?amount = r.nat() else return null; let ?payer = rPayer(r) else return null; let ?day = r.nat() else return null; let ?due = r.nat() else return null; ?#marginCallRaised({ repo; amount; payer; day; due }) };
+      case (?0x08) { let ?repo = r.nat() else return null; let ?cash = r.nat() else return null; let ?collateral = rOptCollateral(r) else return null; let ?lots = rLots(r) else return null; let ?payer = rPayer(r) else return null; let ?day = r.nat() else return null; ?#marginMet({ repo; cash; collateral; lots; payer; day }) };
+      case (?0x09) { let ?repo = r.nat() else return null; let ?out = rCollateral(r) else return null; let ?in_ = rCollateral(r) else return null; let ?outLots = rLots(r) else return null; let ?inLots = rLots(r) else return null; let ?day = r.nat() else return null; ?#collateralSubstituted({ repo; out; in_; outLots; inLots; day }) };
+      case (?0x0A) { let ?repo = r.nat() else return null; let ?principal = r.nat() else return null; let ?interest = r.nat() else return null; let ?marginReturned = rInt(r) else return null; let ?day = r.nat() else return null; ?#repoClosed({ repo; principal; interest; marginReturned; day }) };
+      case (?0x0B) { let ?book = r.text() else return null; let ?counterparty = TyCan.readCounterparty(r) else return null; let ?terms = rLoanTerms(r) else return null; let ?reference = r.text() else return null; let ?trader = r.principal() else return null; let ?day = r.nat() else return null; ?#loanOpened({ book; counterparty; terms; reference; trader; day }) };
+      case (?0x0C) { let ?loan = r.nat() else return null; let ?lots = rLots(r) else return null; let ?day = r.nat() else return null; ?#loanStarted({ loan; lots; day }) };
+      case (?0x0D) { let ?loan = r.nat() else return null; let ?fee = rInt(r) else return null; let ?rebate = rInt(r) else return null; let ?day = r.nat() else return null; ?#loanAccrued({ loan; fee; rebate; day }) };
+      case (?0x0E) { let ?loan = r.nat() else return null; let ?day = r.nat() else return null; let ?returnDay = r.nat() else return null; ?#loanRecalled({ loan; day; returnDay }) };
+      case (?0x0F) { let ?loan = r.nat() else return null; let ?fee = r.nat() else return null; let ?rebate = r.nat() else return null; let ?day = r.nat() else return null; ?#loanReturned({ loan; fee; rebate; day }) };
+      case (?0x10) { let ?loan = r.nat() else return null; let ?action = r.nat() else return null; let ?lot = r.nat() else return null; let ?amount = r.nat() else return null; let ?day = r.nat() else return null; ?#manufacturedPayment({ loan; action; lot; amount; day }) };
+      case (_) null;
+    }
   };
   func wBlobs(w : JC.Writer, xs : [Blob]) { w.nat(xs.size()); for (x in xs.vals()) w.blob(x) };
   func rBlobs(r : JC.Reader) : ?[Blob] { let ?n = r.nat() else return null; if (n > 100_000) return null; let out = List.empty<Blob>(); var i = 0; while (i < n) { let ?b = r.blob() else return null; List.add(out, b); i += 1 }; ?List.toArray(out) };
@@ -349,6 +449,16 @@ module {
       case (#buyIn(x)) { w.byte(0x67); w.nat(x.instruction); TyCan.writeCounterparty(w, x.counterparty); w.nat(x.priceMicro); w.nat(x.settlement); w.text(x.reference); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
       case (#cancelSettlement(x)) { w.byte(0x68); w.nat(x.instruction); w.blob(x.ourConsent); w.blob(x.theirConsent); w.text(x.reason) };
       case (#splitDeal(x)) { w.byte(0x69); w.nat(x.deal); wNats(w, x.parts) };
+      case (#setFinancingPolicy(p)) { w.byte(0x70); wFinancingPolicy(w, p) };
+      case (#openRepo(x)) { w.byte(0x71); w.text(x.book); TyCan.writeCounterparty(w, x.counterparty); wRepoTerms(w, x.terms); w.text(x.reference) };
+      case (#settleRepoLeg(x)) { w.byte(0x72); w.nat(x.repo); w.nat(x.leg); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#resetRepoRate(x)) { w.byte(0x73); w.nat(x.repo); w.nat(x.rateBps); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#meetMarginCall(x)) { w.byte(0x74); w.nat(x.repo); w.nat(x.cash); wOptCollateral(w, x.collateral); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#substituteCollateral(x)) { w.byte(0x75); w.nat(x.repo); wCollateral(w, x.out); wCollateral(w, x.in_) };
+      case (#openLoan(x)) { w.byte(0x76); w.text(x.book); TyCan.writeCounterparty(w, x.counterparty); wLoanTerms(w, x.terms); w.text(x.reference) };
+      case (#settleLoanLeg(x)) { w.byte(0x77); w.nat(x.loan); w.nat(x.leg); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
+      case (#recallLoan(x)) { w.byte(0x78); w.nat(x.loan) };
+      case (#instructFinancing(x)) { w.byte(0x79); wFamily(w, x.family); w.nat(x.id); w.nat(x.leg); w.principal(x.counterparty); w.optNat(x.tradeId); w.text(x.reference) };
       case (#setTreasuryPolicy(p)) { w.byte(0x20); TyCan.writePolicy(w, p) };
       case (#registerSecurity(x)) { w.byte(0x21); TyCan.writeSecurityTerms(w, x.terms) };
       case (#publishCurve(x)) { w.byte(0x22); TyCan.writeCurve(w, x.curve) };
@@ -430,6 +540,16 @@ module {
       case 0x67 { let ?instruction = r.nat() else return null; let ?counterparty = TyCan.readCounterparty(r) else return null; let ?priceMicro = r.nat() else return null; let ?settlement = r.nat() else return null; let ?reference = r.text() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#buyIn({ instruction; counterparty; priceMicro; settlement; reference; postingDate; valueDate; period; narration }) };
       case 0x68 { let ?instruction = r.nat() else return null; let ?ourConsent = r.blob() else return null; let ?theirConsent = r.blob() else return null; let ?reason = r.text() else return null; ?#cancelSettlement({ instruction; ourConsent; theirConsent; reason }) };
       case 0x69 { let ?deal = r.nat() else return null; let ?parts = rNats(r) else return null; ?#splitDeal({ deal; parts }) };
+      case 0x70 { let ?p = rFinancingPolicy(r) else return null; ?#setFinancingPolicy(p) };
+      case 0x71 { let ?book = r.text() else return null; let ?counterparty = TyCan.readCounterparty(r) else return null; let ?terms = rRepoTerms(r) else return null; let ?reference = r.text() else return null; ?#openRepo({ book; counterparty; terms; reference }) };
+      case 0x72 { let ?repo = r.nat() else return null; let ?leg = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#settleRepoLeg({ repo; leg; postingDate; valueDate; period; narration }) };
+      case 0x73 { let ?repo = r.nat() else return null; let ?rateBps = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#resetRepoRate({ repo; rateBps; postingDate; valueDate; period; narration }) };
+      case 0x74 { let ?repo = r.nat() else return null; let ?cash = r.nat() else return null; let ?collateral = rOptCollateral(r) else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#meetMarginCall({ repo; cash; collateral; postingDate; valueDate; period; narration }) };
+      case 0x75 { let ?repo = r.nat() else return null; let ?out = rCollateral(r) else return null; let ?in_ = rCollateral(r) else return null; ?#substituteCollateral({ repo; out; in_ }) };
+      case 0x76 { let ?book = r.text() else return null; let ?counterparty = TyCan.readCounterparty(r) else return null; let ?terms = rLoanTerms(r) else return null; let ?reference = r.text() else return null; ?#openLoan({ book; counterparty; terms; reference }) };
+      case 0x77 { let ?loan = r.nat() else return null; let ?leg = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#settleLoanLeg({ loan; leg; postingDate; valueDate; period; narration }) };
+      case 0x78 { let ?loan = r.nat() else return null; ?#recallLoan({ loan }) };
+      case 0x79 { let ?family = rFamily(r) else return null; let ?id = r.nat() else return null; let ?leg = r.nat() else return null; let ?counterparty = r.principal() else return null; let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; ?#instructFinancing({ family; id; leg; counterparty; tradeId; reference }) };
       case 0x20 { let ?p = TyCan.readPolicy(r) else return null; ?#setTreasuryPolicy(p) };
       case 0x21 { let ?terms = TyCan.readSecurityTerms(r) else return null; ?#registerSecurity({ terms }) };
       case 0x22 { let ?curve = TyCan.readCurve(r) else return null; ?#publishCurve({ curve }) };
@@ -626,6 +746,7 @@ module {
       case (#call(ce)) { w.byte(0x60); wCallEvent(w, ce) };
       case (#custody(ce)) { w.byte(0x61); wCustodyEvent(w, ce) };
       case (#settlement(se)) { w.byte(0x62); wSettlementEvent(w, se) };
+      case (#financing(fe)) { w.byte(0x63); wFinancingEvent(w, fe) };
     }
   };
 
@@ -672,6 +793,7 @@ module {
       case 0x60 { let ?ce = rCallEvent(r) else return null; ?#call(ce) };
       case 0x61 { let ?ce = rCustodyEvent(r) else return null; ?#custody(ce) };
       case 0x62 { let ?se = rSettlementEvent(r) else return null; ?#settlement(se) };
+      case 0x63 { let ?fe = rFinancingEvent(r) else return null; ?#financing(fe) };
       case _ null;
     };
     switch (out) {

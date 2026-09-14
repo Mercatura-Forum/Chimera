@@ -125,6 +125,12 @@ class Reader(V.Reader):
             return {"paid": {"action": self.nat(), "lots": self.nat(), "total": self.nat(), "day": self.nat()}}
         if t == 0x0D:
             return {"entitlementClaimed": {"action": self.nat(), "lot": self.nat(), "amount": self.nat(), "accrued": self.int_(), "day": self.nat()}}
+        if t in (0x0E, 0x0F, 0x10, 0x11):
+            name = {0x0E: "pledged", 0x0F: "released", 0x10: "lent", 0x11: "lentReturned"}[t]
+            return {name: {"lot": self.nat(), "depot": self.text(), "nominal": self.nat(), "reference": self.text(), "day": self.nat()}}
+        if t in (0x12, 0x13):
+            name = {0x12: "collateralReceived", 0x13: "collateralReturned"}[t]
+            return {name: {"isin": self.text(), "depot": self.text(), "nominal": self.nat(), "reference": self.text(), "day": self.nat()}}
         raise ValueError(f"unknown custody event tag {t:#x}")
 
     def venue(self):
@@ -144,8 +150,10 @@ class Reader(V.Reader):
     def cycle(self):
         return {"businessDate": self.nat(), "market": self.text(), "priceSource": self.text()}
 
+    FAMILIES = {0: "treasury", 1: "repo", 2: "loan"}
+
     def instruction(self):
-        return {"deal": self.nat(), "leg": self.nat(), "cycle": self.nat(), "role": {1: "maker", 2: "taker"}[self.byte()], "counterparty": self.principal(),
+        return {"family": self.FAMILIES[self.byte()], "deal": self.nat(), "leg": self.nat(), "cycle": self.nat(), "role": {1: "maker", 2: "taker"}[self.byte()], "counterparty": self.principal(),
                 "assetLedger": self.principal(), "assetAmount": self.nat(), "cashLedger": self.principal(), "cashAmount": self.nat(),
                 "tradeId": self.opt_nat(), "reference": self.text(), "documentHash": self.blob()}
 
@@ -200,6 +208,78 @@ class Reader(V.Reader):
         if t == 0x15:
             return {"tradeAssigned": {"instruction": self.nat(), "tradeId": self.nat(), "day": self.nat()}}
         raise ValueError(f"unknown settlement event tag {t:#x}")
+
+    FIN_ACCOUNTS = ["repoPayable", "reverseRepoReceivable", "repoInterestPayable", "repoInterestReceivable", "repoInterestExpense", "repoInterestIncome", "marginCashGiven", "marginCashReceived",
+                    "lendingFeeReceivable", "lendingFeeIncome", "cashCollateralPayable", "rebateExpense", "manufacturedPaymentReceivable"]
+
+    def financing_policy(self):
+        p = {k: self.text() for k in self.FIN_ACCOUNTS}
+        p["marginGraceDays"] = self.nat()
+        return p
+
+    def collateral(self):
+        return {"isin": self.text(), "nominal": self.nat()}
+
+    def opt_collateral(self):
+        return self.opt(self.collateral)
+
+    def lots(self):
+        return [(self.nat(), self.nat()) for _ in range(self.nat())]
+
+    def repo_terms(self):
+        return {"reverse": self.bool(), "currency": self.text(), "cash": self.nat(), "rateBps": self.nat(), "dayCount": self.p_convention(), "start": self.nat(), "maturity": self.opt_nat(),
+                "collateral": self.collateral(), "haircutBps": self.nat(), "thresholdBps": self.nat(), "cashAccount": self.cash(), "depot": self.text()}
+
+    def loan_terms(self):
+        t = {"isin": self.text(), "nominal": self.nat(), "currency": self.text(), "valueMicro": self.nat(), "feeBps": self.nat(), "dayCount": self.p_convention()}
+        k = self.byte()
+        if k == 1:
+            t["collateral"] = {"cash": {"amount": self.nat(), "rebateBps": self.nat()}}
+        elif k == 2:
+            t["collateral"] = {"securities": self.collateral()}
+        else:
+            raise ValueError(f"unknown loan collateral kind {k}")
+        t.update({"start": self.nat(), "noticeDays": self.nat(), "cashAccount": self.cash(), "depot": self.text()})
+        return t
+
+    def payer(self):
+        return {1: "desk", 2: "counterparty"}[self.byte()]
+
+    def financing_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"policySet": self.financing_policy()}
+        if t == 0x02:
+            return {"repoOpened": {"book": self.text(), "counterparty": self.t_counterparty(), "terms": self.repo_terms(), "reference": self.text(), "trader": self.principal(), "day": self.nat()}}
+        if t == 0x03:
+            return {"repoStarted": {"repo": self.nat(), "lots": self.lots(), "day": self.nat()}}
+        if t == 0x04:
+            return {"repoAccrued": {"repo": self.nat(), "interest": self.int_(), "day": self.nat()}}
+        if t == 0x05:
+            return {"repoRateReset": {"repo": self.nat(), "rateBps": self.nat(), "day": self.nat(), "catchUp": self.int_()}}
+        if t == 0x06:
+            return {"collateralMarked": {"repo": self.nat(), "value": self.nat(), "exposure": self.nat(), "priceMicro": self.nat(), "day": self.nat()}}
+        if t == 0x07:
+            return {"marginCallRaised": {"repo": self.nat(), "amount": self.nat(), "payer": self.payer(), "day": self.nat(), "due": self.nat()}}
+        if t == 0x08:
+            return {"marginMet": {"repo": self.nat(), "cash": self.nat(), "collateral": self.opt_collateral(), "lots": self.lots(), "payer": self.payer(), "day": self.nat()}}
+        if t == 0x09:
+            return {"collateralSubstituted": {"repo": self.nat(), "out": self.collateral(), "in": self.collateral(), "outLots": self.lots(), "inLots": self.lots(), "day": self.nat()}}
+        if t == 0x0A:
+            return {"repoClosed": {"repo": self.nat(), "principal": self.nat(), "interest": self.nat(), "marginReturned": self.int_(), "day": self.nat()}}
+        if t == 0x0B:
+            return {"loanOpened": {"book": self.text(), "counterparty": self.t_counterparty(), "terms": self.loan_terms(), "reference": self.text(), "trader": self.principal(), "day": self.nat()}}
+        if t == 0x0C:
+            return {"loanStarted": {"loan": self.nat(), "lots": self.lots(), "day": self.nat()}}
+        if t == 0x0D:
+            return {"loanAccrued": {"loan": self.nat(), "fee": self.int_(), "rebate": self.int_(), "day": self.nat()}}
+        if t == 0x0E:
+            return {"loanRecalled": {"loan": self.nat(), "day": self.nat(), "returnDay": self.nat()}}
+        if t == 0x0F:
+            return {"loanReturned": {"loan": self.nat(), "fee": self.nat(), "rebate": self.nat(), "day": self.nat()}}
+        if t == 0x10:
+            return {"manufacturedPayment": {"loan": self.nat(), "action": self.nat(), "lot": self.nat(), "amount": self.nat(), "day": self.nat()}}
+        raise ValueError(f"unknown financing event tag {t:#x}")
 
     def call_event(self):
         t = self.byte()
@@ -330,6 +410,26 @@ class Reader(V.Reader):
             return {"cancelSettlement": {"instruction": self.nat(), "ourConsent": self.blob(), "theirConsent": self.blob(), "reason": self.text()}}
         if tag == 0x69:
             return {"splitDeal": {"deal": self.nat(), "parts": self.nats()}}
+        if tag == 0x70:
+            return {"setFinancingPolicy": self.financing_policy()}
+        if tag == 0x71:
+            return {"openRepo": {"book": self.text(), "counterparty": self.t_counterparty(), "terms": self.repo_terms(), "reference": self.text()}}
+        if tag == 0x72:
+            return {"settleRepoLeg": {"repo": self.nat(), "leg": self.nat(), **self.dates()}}
+        if tag == 0x73:
+            return {"resetRepoRate": {"repo": self.nat(), "rateBps": self.nat(), **self.dates()}}
+        if tag == 0x74:
+            return {"meetMarginCall": {"repo": self.nat(), "cash": self.nat(), "collateral": self.opt_collateral(), **self.dates()}}
+        if tag == 0x75:
+            return {"substituteCollateral": {"repo": self.nat(), "out": self.collateral(), "in": self.collateral()}}
+        if tag == 0x76:
+            return {"openLoan": {"book": self.text(), "counterparty": self.t_counterparty(), "terms": self.loan_terms(), "reference": self.text()}}
+        if tag == 0x77:
+            return {"settleLoanLeg": {"loan": self.nat(), "leg": self.nat(), **self.dates()}}
+        if tag == 0x78:
+            return {"recallLoan": {"loan": self.nat()}}
+        if tag == 0x79:
+            return {"instructFinancing": {"family": self.FAMILIES[self.byte()], "id": self.nat(), "leg": self.nat(), "counterparty": self.principal(), "tradeId": self.opt_nat(), "reference": self.text()}}
         raise ValueError(f"unknown command tag {tag:#x}")
 
     def proposed(self):
@@ -415,6 +515,8 @@ class Reader(V.Reader):
             return {"custody": self.custody_event()}
         if t == 0x62:
             return {"settlement": self.settlement_event()}
+        if t == 0x63:
+            return {"financing": self.financing_event()}
         raise ValueError(f"unknown desk event tag {t:#x}")
 
     # ── lifted without change from Manticore's verify_bank.py at 9c0c30e ──

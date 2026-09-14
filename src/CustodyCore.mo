@@ -96,6 +96,8 @@ module {
     actionsByIsin : RI.State;  // isin(12) ‖ id(8) -> 1
     actionsByState : RI.State; // state(1) ‖ id(8) -> 1
     entitlements : RI.State;   // action(8) ‖ lot(8) -> row
+    encumbered : RI.State;     // lot(8) ‖ depotHash(8) -> nominal pledged or lent
+    received : RI.State;       // isin(12) ‖ depotHash(8) -> collateral nominal held for a counterparty
     var policy : ?CT.Policy;
     var instrumentCount : Nat;
     var depotCount : Nat;
@@ -118,6 +120,8 @@ module {
       actionsByIsin = RI.newStateIn(arena, { keyBytes = 20; valBytes = 1 });
       actionsByState = RI.newStateIn(arena, { keyBytes = 9; valBytes = 1 });
       entitlements = RI.newStateIn(arena, { keyBytes = 16; valBytes = ENTITLEMENT_ROW_BYTES });
+      encumbered = RI.newStateIn(arena, { keyBytes = 16; valBytes = 8 });
+      received = RI.newStateIn(arena, { keyBytes = 20; valBytes = 8 });
       var policy = null; var instrumentCount = 0; var depotCount = 0; var holdingCount = 0; var actionCount = 0; var entitlementCount = 0; var transferCount = 0;
     }
   };
@@ -132,6 +136,20 @@ module {
   public func dealDepotOf(s : State, deal : TT.DealId) : ?Text { switch (RI.get(s.dealDepot, R.key(deal, 8))) { case (?v) ?R.getText(Blob.toArray(v), 0, 32); case null null } };
   func holdingKey(lot : Nat, depotHash : Nat) : Blob { R.key2(lot, 8, depotHash, 8) };
   public func holding(s : State, lot : TT.DealId, depotId : Text) : Nat { switch (RI.get(s.holdings, holdingKey(lot, hash8(depotId)))) { case (?v) R.getNat(Blob.toArray(v), 0, 8); case null 0 } };
+  public func encumbered(s : State, lot : TT.DealId, depotId : Text) : Nat { switch (RI.get(s.encumbered, holdingKey(lot, hash8(depotId)))) { case (?v) R.getNat(Blob.toArray(v), 0, 8); case null 0 } };
+  /// What of a lot's holding in a depot a sale or a transfer may take: the holding less what is pledged or lent.
+  public func available(s : State, lot : TT.DealId, depotId : Text) : Nat { let h = holding(s, lot, depotId); let e = encumbered(s, lot, depotId); if (e > h) 0 else h - e };
+  func receivedKey(isin : Text, depotId : Text) : Blob { Blob.fromArray(Array.concat<Nat8>(Blob.toArray(R.textKey(isin, 12)), Blob.toArray(R.key(hash8(depotId), 8)))) };
+  public func received(s : State, isin : Text, depotId : Text) : Nat { switch (RI.get(s.received, receivedKey(isin, depotId))) { case (?v) R.getNat(Blob.toArray(v), 0, 8); case null 0 } };
+  /// The lots of an instrument available in a depot, first in first out, for a pledge or a loan.
+  public func availableIn(s : State, depotId : Text, isin : Text) : [(TT.DealId, Nat)] {
+    Array.filter<(TT.DealId, Nat)>(Array.map<(TT.DealId, Nat), (TT.DealId, Nat)>(holdingsIn(s, depotId, isin), func((lot, _)) { (lot, available(s, lot, depotId)) }), func((_, n)) { n > 0 })
+  };
+  public func availableView(s : State, depotId : Text, isin : Text) : CT.AvailableView {
+    var held = 0; var enc = 0;
+    for ((lot, n) in holdingsIn(s, depotId, isin).vals()) { held += n; enc += Nat.min(n, encumbered(s, lot, depotId)) };
+    { depot = depotId; isin; held; encumbered = enc; available = held - enc; received = received(s, isin, depotId) }
+  };
   public func action(s : State, id : CT.ActionId) : ?ActionRow { switch (RI.get(s.actions, R.key(id, 8))) { case (?v) ?decodeAction(id, v); case null null } };
   public func entitlement(s : State, id : CT.ActionId, lot : TT.DealId) : ?EntitlementRow { switch (RI.get(s.entitlements, R.key2(id, 8, lot, 8))) { case (?v) ?decodeEntitlement(id, lot, v); case null null } };
   func putAction(s : State, r : ActionRow) { ignore RI.put(s.actions, R.key(r.id, 8), encodeAction(r)) };
@@ -250,7 +268,7 @@ module {
     if (Text.equal(from, to)) return bad("a transfer moves between two depots");
     if (nominal == 0) return bad("a transfer moves a positive nominal");
     if (bytesOf(reference) > 64) return bad("the reference is at most 64 bytes");
-    let held = holding(s, lot, from);
+    let held = available(s, lot, from);
     if (held < nominal) return #err(#DepotShort({ depot = from; isin = ""; held; wanted = nominal }));
     #ok(#transferred({ lot; from; to; nominal; reference; day }))
   };
@@ -281,7 +299,7 @@ module {
   public func checkSaleDepot(s : State, treasury : TreasuryCore.State, sale : TreasuryCore.DealRow, t : TT.SecurityTrade, method : TT.LotMethod) : ?CT.Error {
     let ?depotId = dealDepotOf(s, sale.id) else return null;
     for ((lot, q) in TreasuryCore.allocateSale(TreasuryCore.lotsOf(treasury, sale.book, t.isin), t.nominal, method).vals()) {
-      let held = holding(s, lot.id, depotId);
+      let held = available(s, lot.id, depotId);
       if (held < q) return ?#DepotShort({ depot = depotId; isin = t.isin; held; wanted = q });
     };
     null
@@ -371,22 +389,32 @@ module {
   /// A claimed coupon is cash against the claim's receivable; a distribution goes to income; a partial or early
   /// redemption consumes the lot pro rata to what is booked, as Manticore's sale consumes it, the proceeds against
   /// the book value and the difference realised.
-  public func planPay(s : State, p : TT.Policy, r : ActionRow, e : EntitlementRow, lot : TreasuryCore.DealRow, cash : TT.CashAccount, currency : Text, day : Nat) : Res<Payment> {
+  /// Where the cash of a payment on a lent lot goes instead: the part out on loan is a manufactured payment, a
+  /// receivable from the borrower in the account given, pro rata to the nominal lent.
+  public type Manufactured = { account : Text; sub : JT.SubledgerKey; lent : Nat };
+  public func manufacturedPart(amount : Nat, nominal : Nat, lent : Nat) : Nat { if (nominal == 0 or lent == 0) 0 else M.roundNat(M.q(amount * Nat.min(lent, nominal), nominal)) };
+  public func planPay(s : State, p : TT.Policy, r : ActionRow, e : EntitlementRow, lot : TreasuryCore.DealRow, cash : TT.CashAccount, currency : Text, day : Nat) : Res<Payment> { planPayWith(s, p, r, e, lot, cash, currency, day, null) };
+  public func planPayWith(s : State, p : TT.Policy, r : ActionRow, e : EntitlementRow, lot : TreasuryCore.DealRow, cash : TT.CashAccount, currency : Text, day : Nat, manufactured : ?Manufactured) : Res<Payment> {
     if (r.state != #entitled) return #err(#ActionNotIn({ action = r.id; state = CT.actionStateText(r.state); wanted = "entitled" }));
     if (day < r.paymentDate) return #err(#NotDue({ action = r.id; due = r.paymentDate; day }));
     if (e.paid) return #err(#ActionNotIn({ action = r.id; state = "paid"; wanted = "entitled" }));
     let ls = List.empty<JT.Leg>();
     let sub = ?TreasuryCore.dealSub(lot.id);
     let cs = TreasuryCore.cashSub(cash);
+    func cashIn(amount : Nat) {
+      let borrowed = switch (manufactured) { case (?m) manufacturedPart(amount, e.nominal, m.lent); case null 0 };
+      addLeg(ls, cash.account, cs, #debit, currency, amount - borrowed);
+      switch (manufactured) { case (?m) addLeg(ls, m.account, ?m.sub, #debit, currency, borrowed); case null {} };
+    };
     switch (r.kind) {
       case 1 {
         if (not e.claimed) return #err(#ActionNotIn({ action = r.id; state = "entitled"; wanted = "claimed" }));
-        addLeg(ls, cash.account, cs, #debit, currency, e.amount);
+        cashIn(e.amount);
         addLeg(ls, p.couponReceivable, ?claimSub(r.id, lot.id), #credit, currency, e.amount);
         #ok({ ev = #entitlementPaid({ action = r.id; lot = lot.id; amount = e.amount; nominal = 0; realised = 0; day }); legs = List.toArray(ls); treasury = null })
       };
       case 4 {
-        addLeg(ls, cash.account, cs, #debit, currency, e.amount);
+        cashIn(e.amount);
         addLeg(ls, p.couponIncome, null, #credit, currency, e.amount);
         #ok({ ev = #entitlementPaid({ action = r.id; lot = lot.id; amount = e.amount; nominal = 0; realised = 0; day }); legs = List.toArray(ls); treasury = null })
       };
@@ -487,7 +515,18 @@ module {
         if (x.nominal > 0) reduceLotHolding(s, x.lot, isinOf(x.lot), x.nominal);
       };
       case (#paid(x)) { switch (action(s, x.action)) { case (?r) { let n = { r with state = #paid; lastBlock = block }; putAction(s, n); indexAction(s, n) }; case null {} } };
+      case (#pledged(x)) encumber(s, x.lot, x.depot, x.nominal, true);
+      case (#lent(x)) encumber(s, x.lot, x.depot, x.nominal, true);
+      case (#released(x)) encumber(s, x.lot, x.depot, x.nominal, false);
+      case (#lentReturned(x)) encumber(s, x.lot, x.depot, x.nominal, false);
+      case (#collateralReceived(x)) { ignore RI.put(s.received, receivedKey(x.isin, x.depot), R.key(received(s, x.isin, x.depot) + x.nominal, 8)) };
+      case (#collateralReturned(x)) { let have = received(s, x.isin, x.depot); ignore RI.put(s.received, receivedKey(x.isin, x.depot), R.key(if (x.nominal > have) 0 else have - x.nominal, 8)) };
     }
+  };
+  func encumber(s : State, lot : Nat, depotId : Text, by : Nat, more : Bool) {
+    let have = encumbered(s, lot, depotId);
+    let next = if (more) have + by else (if (by > have) 0 else have - by);
+    ignore RI.put(s.encumbered, holdingKey(lot, hash8(depotId)), R.key(next, 8));
   };
 
   /// What the custody fold reads out of Manticore's treasury events: a purchase lot settled lands in its depot, a
@@ -539,7 +578,7 @@ module {
   public func fingerprintInto(w : C.Writer, s : State) {
     switch (s.policy) { case null w.byte(0); case (?p) { w.byte(1); w.text(CT.basisText(p.entitlementBasis)) } };
     w.nat(s.instrumentCount); w.nat(s.depotCount); w.nat(s.holdingCount); w.nat(s.actionCount); w.nat(s.entitlementCount); w.nat(s.transferCount);
-    for ((idx, width) in [(s.instruments, 12), (s.depots, 32), (s.depotByHash, 8), (s.bookDepot, 32), (s.dealDepot, 8), (s.holdings, 16), (s.byDepotIsin, 28), (s.actions, 8), (s.actionsByIsin, 20), (s.actionsByState, 9), (s.entitlements, 16)].vals()) {
+    for ((idx, width) in [(s.instruments, 12), (s.depots, 32), (s.depotByHash, 8), (s.bookDepot, 32), (s.dealDepot, 8), (s.holdings, 16), (s.byDepotIsin, 28), (s.actions, 8), (s.actionsByIsin, 20), (s.actionsByState, 9), (s.entitlements, 16), (s.encumbered, 16), (s.received, 20)].vals()) {
       let (lo, hi) = R.fullRange(width);
       var n = 0;
       walk(idx, lo, hi, func(k, v) { w.blob(k); w.blob(v); n += 1 });

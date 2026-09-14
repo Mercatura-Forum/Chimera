@@ -8,6 +8,16 @@ import Freeze "mo:kernel/domain/Freeze";
 module {
   public func vectors() : [Freeze.Vector] {
     [
+      { family = "setFinancingPolicy"; version = 1; hex = "5537023f5def370b8e495cae6dd96bdd7192f728c268aa332028160315718e5a" },
+      { family = "openRepo"; version = 1; hex = "3861c145d91c275fe90fb2bee96ef7d9a9fd59ceedc1c38d1482f281c25ea85e" },
+      { family = "settleRepoLeg"; version = 1; hex = "c317cb8b5e98b97f4d39ef18aea9348714dc0f9c6fe37453d989d62a0e0c5844" },
+      { family = "resetRepoRate"; version = 1; hex = "cdf952dcd73eef2e487d129a4a42164831b926e0c27a8fb88a48fb27f49d4869" },
+      { family = "meetMarginCall"; version = 1; hex = "044220fbbf37845708e799ca1461b21fed1264db9a050b7b5b606281da781cfd" },
+      { family = "substituteCollateral"; version = 1; hex = "d6e5ffae9d2e4edc599cab054c2ba27e70c5b8e6d4c1e42a23b98c89a767d2bf" },
+      { family = "openLoan"; version = 1; hex = "c325c94301026bcff4fd5981f27b37eb6b63b451ff210f30458877f47c312c02" },
+      { family = "settleLoanLeg"; version = 1; hex = "15c07e3b6c46875ba22564c900f9d5d62785e225a2d25dbcac29ea4e5321b937" },
+      { family = "recallLoan"; version = 1; hex = "9e2d6a7d9ddd58e2935c59483d1b475a2529ee5bdec844eefe796a976b5de2ba" },
+      { family = "instructFinancing"; version = 1; hex = "dd1d7bee6e3cfb173c94d6389fb25d8ef977936c2d0a677d52a9a871c32b3935" },
       { family = "setSettlementVenue"; version = 1; hex = "3571e8618edaa05d2e7e21f490513d30ab886b8f3796a554219b21426d3d4836" },
       { family = "setSettlementLedger"; version = 1; hex = "b4ca72e34b8573c48c24b032b06066f595fda841e90a80ca3172bf3da9915237" },
       { family = "openSettlementCycle"; version = 1; hex = "e0bbe9ea1ace303db40fc71164fe41c3c218e8636fdce292aef1a89619f6bc64" },

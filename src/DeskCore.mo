@@ -55,6 +55,8 @@ import CustodyCore "CustodyCore";
 import ST "SettlementTypes";
 import SettlementCore "SettlementCore";
 import SettlementMessages "SettlementMessages";
+import FT "FinancingTypes";
+import FinancingCore "FinancingCore";
 import DT "mo:tachyon/DvpTypes";
 import Sha256 "mo:sha2/Sha256";
 import Calendar "mo:journal/Calendar";
@@ -76,6 +78,7 @@ module {
     calls : CallCore.State;
     custody : CustodyCore.State;
     settlement : SettlementCore.State;
+    financing : FinancingCore.State;
   };
 
   public func newState(installer : Principal) : State { newStateIn(installer, RI.newArena()) };
@@ -92,6 +95,7 @@ module {
       calls = CallCore.newState(arena);
       custody = CustodyCore.newState(arena);
       settlement = SettlementCore.newState(arena);
+      financing = FinancingCore.newState(arena);
     }
   };
 
@@ -134,6 +138,10 @@ module {
       case (#settleCall(x)) ?x.postingDate;
       case (#processCorporateAction(x)) ?x.postingDate;
       case (#buyIn(x)) ?x.postingDate;
+      case (#settleRepoLeg(x)) ?x.postingDate;
+      case (#resetRepoRate(x)) ?x.postingDate;
+      case (#meetMarginCall(x)) ?x.postingDate;
+      case (#settleLoanLeg(x)) ?x.postingDate;
       case (_) null;
     }
   };
@@ -162,9 +170,20 @@ module {
       case (#splitDeal(x)) bookOfDeal(s, x.deal);
       case (#buyIn(x)) bookOfInstruction(s, x.instruction);
       case (#cancelSettlement(x)) bookOfInstruction(s, x.instruction);
+      case (#openRepo(x)) ?x.book;
+      case (#openLoan(x)) ?x.book;
+      case (#settleRepoLeg(x)) bookOfRepo(s, x.repo);
+      case (#resetRepoRate(x)) bookOfRepo(s, x.repo);
+      case (#meetMarginCall(x)) bookOfRepo(s, x.repo);
+      case (#substituteCollateral(x)) bookOfRepo(s, x.repo);
+      case (#settleLoanLeg(x)) bookOfLoan(s, x.loan);
+      case (#recallLoan(x)) bookOfLoan(s, x.loan);
+      case (#instructFinancing(x)) { switch (x.family) { case (#repo) bookOfRepo(s, x.id); case (#loan) bookOfLoan(s, x.id); case (#treasury) bookOfDeal(s, x.id) } };
       case (_) null;
     }
   };
+  func bookOfRepo(s : State, id : Nat) : ?T.BookId { switch (FinancingCore.repo(s.financing, id)) { case (?r) ?r.book; case null null } };
+  func bookOfLoan(s : State, id : Nat) : ?T.BookId { switch (FinancingCore.loan(s.financing, id)) { case (?r) ?r.book; case null null } };
   func bookOfInstruction(s : State, id : Nat) : ?T.BookId { switch (SettlementCore.instruction(s.settlement, id)) { case (?i) bookOfDeal(s, i.deal); case null null } };
   func bookOfCall(s : State, call : Nat) : ?T.BookId { switch (CallCore.row(s.calls, call)) { case (?r) ?r.book; case null null } };
   func balanceOfCall(s : State, call : Nat) : [(Text, Nat)] { switch (CallCore.row(s.calls, call)) { case (?r) [(r.currency, r.balance)]; case null [] } };
@@ -201,6 +220,13 @@ module {
       case (#splitDeal(x)) notionalOfDeal(s, x.deal);
       case (#buyIn(x)) { switch (SettlementCore.instruction(s.settlement, x.instruction)) { case (?i) notionalOfDeal(s, i.deal); case null [] } };
       case (#cancelSettlement(x)) { switch (SettlementCore.instruction(s.settlement, x.instruction)) { case (?i) notionalOfDeal(s, i.deal); case null [] } };
+      case (#openRepo(x)) [(x.terms.currency, x.terms.cash)];
+      case (#settleRepoLeg(x)) { switch (FinancingCore.repo(s.financing, x.repo)) { case (?r) [(r.currency, r.cash)]; case null [] } };
+      case (#resetRepoRate(x)) { switch (FinancingCore.repo(s.financing, x.repo)) { case (?r) [(r.currency, r.cash)]; case null [] } };
+      case (#meetMarginCall(x)) { switch (FinancingCore.repo(s.financing, x.repo)) { case (?r) [(r.currency, x.cash)]; case null [] } };
+      case (#openLoan(x)) [(x.terms.currency, FinancingCore.loanValue({ id = 0; state = #open; book = ""; cpHash = 0; currency = x.terms.currency; isin = x.terms.isin; nominal = x.terms.nominal; valueMicro = x.terms.valueMicro; feeBps = 0; dayCount = 0; cashCollateral = 0; rebateBps = 0; collateralIsin = ""; collateralNominal = 0; start = 0; noticeDays = 0; returnDay = 0; accrualFrom = 0; feeBefore = 0; feePosted = 0; rebateBefore = 0; rebatePosted = 0; manufactured = 0; depot = ""; lastBlock = 0; refHash = 0 }))];
+      case (#settleLoanLeg(x)) { switch (FinancingCore.loan(s.financing, x.loan)) { case (?r) [(r.currency, FinancingCore.loanValue(r))]; case null [] } };
+      case (#instructFinancing(x)) { switch (x.family, FinancingCore.repo(s.financing, x.id), FinancingCore.loan(s.financing, x.id)) { case (#repo, ?r, _) [(r.currency, r.cash)]; case (#loan, _, ?l) [(l.currency, FinancingCore.loanValue(l))]; case (_) [] } };
       case (_) [];
     }
   };
@@ -346,6 +372,22 @@ module {
   /// The settlement of an instructed leg from Tachyon's verified receipt: the receipt and the settlement recorded,
   /// then Manticore's leg settlement with its postings, in one act.
   public func planReceiptSettlement(s : State, bb : Blocks, js : JCore.State, journalCaller : Principal, now : Nat64, i : SettlementCore.InstructionRow, receipt : SettlementCore.Receipt, day : Nat) : Res<Plan> {
+    let head : [T.Event] = [
+      #settlement(#receiptVerified({ instruction = i.id; tradeId = i.tradeId; seq = receipt.seq; leaf = receipt.leaf; root = receipt.root; assetPaid = receipt.assetPaid; cashPaid = receipt.cashPaid; day })),
+      #settlement(#settled({ instruction = i.id; tradeId = i.tradeId; day })),
+    ];
+    if (i.family != #treasury) {
+      let ?period = periodForDay(js, day) else return #err(#JournalError({ error = #UnknownPeriod({ period = "open period containing day " # Nat.toText(day) }) }));
+      let plan = switch (i.family) {
+        case (#repo) planRepoLeg(s, bb, js, journalCaller, now, i.deal, i.leg, "tachyon", day, day, period, "settled through Tachyon, trade " # Nat.toText(i.tradeId));
+        case (#loan) planLoanLeg(s, bb, js, journalCaller, now, i.deal, i.leg, "tachyon", day, day, period, "settled through Tachyon, trade " # Nat.toText(i.tradeId));
+        case (#treasury) return financingErr(#InvalidTerms({ reason = "unreachable" }));
+      };
+      return switch (plan) {
+        case (#err(e)) #err(e);
+        case (#ok(p)) { let ev = switch (p.event) { case (?e) [e]; case null [] }; #ok({ event = ?head[0]; extra = Array.concat<T.Event>(Array.concat<T.Event>([head[1]], ev), p.extra); journal = p.journal }) };
+      };
+    };
     let r = switch (treasuryRow(s, i.deal)) { case (#err(e)) return #err(e); case (#ok(r)) r };
     switch (requireNoOpenRun(s, r.book, day)) { case (?e) return #err(e); case null {} };
     let kind = switch (treasuryKind(bb, r)) { case (#err(e)) return #err(e); case (#ok(k)) k };
@@ -353,16 +395,137 @@ module {
     let ?period = periodForDay(js, day) else return #err(#JournalError({ error = #UnknownPeriod({ period = "open period containing day " # Nat.toText(day) }) }));
     switch (saleDepotCheck(s, r, kind, i.leg)) { case (?e) return #err(e); case null {} };
     let act = switch (TreasuryCore.planSettleLeg(s.treasury, r, kind, i.leg, day, ctx)) { case (#err(e)) return treasuryErr(e); case (#ok(a)) a };
-    let head : [T.Event] = [
-      #settlement(#receiptVerified({ instruction = i.id; tradeId = i.tradeId; seq = receipt.seq; leaf = receipt.leaf; root = receipt.root; assetPaid = receipt.assetPaid; cashPaid = receipt.cashPaid; day })),
-      #settlement(#settled({ instruction = i.id; tradeId = i.tradeId; day })),
-    ];
     switch (treasuryPost(js, journalCaller, now, "treasury-settle", ["tachyon", Nat.toText(i.id), Nat.toText(i.leg)], act, day, day, period, "settled through Tachyon, trade " # Nat.toText(i.tradeId))) {
       case (#err(e)) #err(e);
       case (#ok(plan)) {
         let ev = switch (plan.event) { case (?e) [e]; case null [] };
         #ok({ event = ?head[0]; extra = Array.concat<T.Event>(Array.concat<T.Event>([head[1]], ev), plan.extra); journal = plan.journal })
       };
+    }
+  };
+  func financingErr<X>(e : FT.Error) : Res<X> { #err(#FinancingError({ error = e })) };
+  func financingPlan(r : Result.Result<FT.Event, FT.Error>) : Res<Plan> { switch (r) { case (#err(e)) financingErr(e); case (#ok(ev)) only(#financing(ev)) } };
+  func repoRow(s : State, id : Nat) : Res<FinancingCore.RepoRow> { switch (FinancingCore.repo(s.financing, id)) { case (?r) #ok(r); case null financingErr(#UnknownRepo({ repo = id })) } };
+  func loanRow(s : State, id : Nat) : Res<FinancingCore.LoanRow> { switch (FinancingCore.loan(s.financing, id)) { case (?r) #ok(r); case null financingErr(#UnknownLoan({ loan = id })) } };
+  /// The opening block of a repo or a loan: the counterparty, the reference and the cash account.
+  public func repoOpeningOf(bb : Blocks, id : Nat) : (Text, Text, ?TT.CashAccount) {
+    switch (bb.get(id)) { case (?b) { switch (b.event) { case (#financing(#repoOpened(x))) (x.counterparty.name, x.reference, ?x.terms.cashAccount); case (_) ("", "", null) } }; case null ("", "", null) }
+  };
+  public func loanOpeningOf(bb : Blocks, id : Nat) : (Text, Text, ?TT.CashAccount) {
+    switch (bb.get(id)) { case (?b) { switch (b.event) { case (#financing(#loanOpened(x))) (x.counterparty.name, x.reference, ?x.terms.cashAccount); case (_) ("", "", null) } }; case null ("", "", null) }
+  };
+  /// The day's price of an instrument per 100, from its price curve.
+  func priceOf(s : State, isin : Text, day : Nat) : ?Nat {
+    switch (TreasuryCore.curveOn(s.treasury, isin, day)) { case (?c) { if (c.kind == #securityPrice and c.points.size() == 1) ?Int.abs(c.points[0].1) else null }; case null null }
+  };
+  /// A financing event with its postings and the custody movements that go with it: the pledge or the receipt of
+  /// collateral at a repo's start, its release or return at the close, the lots lent at a loan's start and back
+  /// at its return. `reference` names the repo or the loan on the custody events.
+  func financingAct(s : State, js : JCore.State, journalCaller : Principal, now : Nat64, ev : FT.Event, r : ?FinancingCore.RepoRow, l : ?FinancingCore.LoanRow, cash : TT.CashAccount, custodyEvents : [T.Event], purpose : Text, parts : [Text], postingDate : Nat, valueDate : Nat, period : Text, narration : Text) : Res<Plan> {
+    let ?p = FinancingCore.policy(s.financing) else return financingErr(#NoPolicy);
+    let legs = FinancingCore.legsOf(p, cash, r, l, ev);
+    if (legs.size() == 0) return #ok({ event = ?#financing(ev); extra = custodyEvents; journal = [] });
+    switch (postLegs(js, journalCaller, now, purpose, parts, legs, postingDate, valueDate, period, narration)) {
+      case (#err(e)) #err(e);
+      case (#ok(plan)) #ok({ event = ?#financing(ev); extra = custodyEvents; journal = plan.journal });
+    }
+  };
+  /// The custody side of a repo's start: the desk's collateral pledged lot by lot from the depot, or the
+  /// counterparty's collateral received into it.
+  func repoStartCustody(s : State, r : FinancingCore.RepoRow, day : Nat) : Res<([(TT.DealId, Nat)], [T.Event])> {
+    let reference = "repo/" # Nat.toText(r.id);
+    if (r.reverse) return #ok(([], [#custody(#collateralReceived({ isin = r.isin; depot = r.depot; nominal = r.nominal; reference; day }))]));
+    let lots = switch (FinancingCore.allocate(CustodyCore.availableIn(s.custody, r.depot, r.isin), r.nominal, r.isin)) { case (#err(e)) return financingErr(e); case (#ok(x)) x };
+    #ok((lots, Array.map<(TT.DealId, Nat), T.Event>(lots, func((lot, n)) { #custody(#pledged({ lot; depot = r.depot; nominal = n; reference; day })) })))
+  };
+  func repoCloseCustody(s : State, r : FinancingCore.RepoRow, day : Nat) : [T.Event] {
+    let reference = "repo/" # Nat.toText(r.id);
+    if (r.reverse) return [#custody(#collateralReturned({ isin = r.isin; depot = r.depot; nominal = r.nominal; reference; day }))];
+    // every lot pledged to the repo is released: the pledges are the custody's encumbrances under the repo's reference
+    Array.map<(TT.DealId, Nat), T.Event>(pledgedLots(s, r), func((lot, n)) { #custody(#released({ lot; depot = r.depot; nominal = n; reference; day })) })
+  };
+  /// The lots a repo holds pledged, read back from the desk log's own events for the repo.
+  public func pledgedLots(s : State, r : FinancingCore.RepoRow) : [(TT.DealId, Nat)] { FinancingCore.lotsOfRepo(s.financing, r.id) };
+  /// The plan of a repo leg: the start (the cash and the collateral) or the close (the repurchase price and the
+  /// collateral back), by hand or from Tachyon's receipt.
+  public func planRepoLeg(s : State, bb : Blocks, js : JCore.State, journalCaller : Principal, now : Nat64, id : Nat, leg : Nat, authId : Text, postingDate : Nat, valueDate : Nat, period : Text, narration : Text) : Res<Plan> {
+    let r = switch (repoRow(s, id)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+    switch (requireNoOpenRun(s, r.book, valueDate)) { case (?e) return #err(e); case null {} };
+    let (_, _, cashOpt) = repoOpeningOf(bb, id);
+    let ?cash = cashOpt else return financingErr(#UnknownRepo({ repo = id }));
+    switch (leg) {
+      case 0 {
+        if (r.state != #open) return financingErr(#RepoNotIn({ repo = id; state = FT.repoStateText(r.state); wanted = "open" }));
+        if (valueDate < r.start) return financingErr(#NotDue({ id; due = r.start; day = valueDate }));
+        let (lots, custody) = switch (repoStartCustody(s, r, valueDate)) { case (#err(e)) return #err(e); case (#ok(x)) x };
+        financingAct(s, js, journalCaller, now, #repoStarted({ repo = id; lots; day = valueDate }), ?r, null, cash, custody, "repo-start", [authId, Nat.toText(id)], postingDate, valueDate, period, narration)
+      };
+      case 1 {
+        let ev = switch (FinancingCore.planClose(s.financing, id, valueDate)) { case (#err(e)) return financingErr(e); case (#ok(e)) e };
+        financingAct(s, js, journalCaller, now, ev, ?r, null, cash, repoCloseCustody(s, r, valueDate), "repo-close", [authId, Nat.toText(id)], postingDate, valueDate, period, narration)
+      };
+      case (_) financingErr(#InvalidTerms({ reason = "a repo has a start leg and a close leg" }));
+    }
+  };
+  public func planLoanLeg(s : State, bb : Blocks, js : JCore.State, journalCaller : Principal, now : Nat64, id : Nat, leg : Nat, authId : Text, postingDate : Nat, valueDate : Nat, period : Text, narration : Text) : Res<Plan> {
+    let l = switch (loanRow(s, id)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+    switch (requireNoOpenRun(s, l.book, valueDate)) { case (?e) return #err(e); case null {} };
+    let (_, _, cashOpt) = loanOpeningOf(bb, id);
+    let ?cash = cashOpt else return financingErr(#UnknownLoan({ loan = id }));
+    let reference = "loan/" # Nat.toText(id);
+    switch (leg) {
+      case 0 {
+        if (l.state != #open) return financingErr(#LoanNotIn({ loan = id; state = FT.loanStateText(l.state); wanted = "open" }));
+        if (valueDate < l.start) return financingErr(#NotDue({ id; due = l.start; day = valueDate }));
+        let lots = switch (FinancingCore.allocate(CustodyCore.availableIn(s.custody, l.depot, l.isin), l.nominal, l.isin)) { case (#err(e)) return financingErr(e); case (#ok(x)) x };
+        let custody = List.empty<T.Event>();
+        for ((lot, n) in lots.vals()) List.add(custody, #custody(#lent({ lot; depot = l.depot; nominal = n; reference; day = valueDate })));
+        if (l.collateralNominal > 0) List.add(custody, #custody(#collateralReceived({ isin = l.collateralIsin; depot = l.depot; nominal = l.collateralNominal; reference; day = valueDate })));
+        financingAct(s, js, journalCaller, now, #loanStarted({ loan = id; lots; day = valueDate }), null, ?l, cash, List.toArray(custody), "loan-start", [authId, Nat.toText(id)], postingDate, valueDate, period, narration)
+      };
+      case 1 {
+        let ev = switch (FinancingCore.planReturn(s.financing, id, valueDate)) { case (#err(e)) return financingErr(e); case (#ok(e)) e };
+        let custody = List.empty<T.Event>();
+        for ((lot, n) in FinancingCore.lotsOfLoan(s.financing, id).vals()) List.add(custody, #custody(#lentReturned({ lot; depot = l.depot; nominal = n; reference; day = valueDate })));
+        if (l.collateralNominal > 0) List.add(custody, #custody(#collateralReturned({ isin = l.collateralIsin; depot = l.depot; nominal = l.collateralNominal; reference; day = valueDate })));
+        financingAct(s, js, journalCaller, now, ev, null, ?l, cash, List.toArray(custody), "loan-return", [authId, Nat.toText(id)], postingDate, valueDate, period, narration)
+      };
+      case (_) financingErr(#InvalidTerms({ reason = "a loan has a start leg and a return leg" }));
+    }
+  };
+  /// What a financing leg moves on the ledgers, for a settlement instruction: the collateral or the lent nominal
+  /// against the cash of the leg, and whether the desk delivers the security.
+  public func financingLegAmounts(s : State, family : ST.Family, id : Nat, leg : Nat, day : Nat) : Res<{ isin : Text; currency : Text; nominal : Nat; cash : Nat; deskDelivers : Bool; cycleDay : Nat }> {
+    switch (family) {
+      case (#repo) {
+        let r = switch (repoRow(s, id)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        switch (leg) {
+          case 0 { if (r.state != #open) return financingErr(#RepoNotIn({ repo = id; state = FT.repoStateText(r.state); wanted = "open" })); #ok({ isin = r.isin; currency = r.currency; nominal = r.nominal; cash = r.cash; deskDelivers = not r.reverse; cycleDay = r.start }) };
+          case 1 {
+            if (r.state != #started) return financingErr(#RepoNotIn({ repo = id; state = FT.repoStateText(r.state); wanted = "started" }));
+            let closeDay = if (r.maturity == 0) day else r.maturity;
+            let interest = FinancingCore.repoInterestTarget(r, closeDay);
+            #ok({ isin = r.isin; currency = r.currency; nominal = r.nominal; cash = r.cash + Int.abs(interest); deskDelivers = r.reverse; cycleDay = closeDay })
+          };
+          case (_) financingErr(#InvalidTerms({ reason = "a repo has a start leg and a close leg" }));
+        }
+      };
+      case (#loan) {
+        let l = switch (loanRow(s, id)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        if (l.cashCollateral == 0) return financingErr(#InvalidTerms({ reason = "a loan against securities collateral settles by hand; the venue trades a security against cash" }));
+        switch (leg) {
+          case 0 { if (l.state != #open) return financingErr(#LoanNotIn({ loan = id; state = FT.loanStateText(l.state); wanted = "open" })); #ok({ isin = l.isin; currency = l.currency; nominal = l.nominal; cash = l.cashCollateral; deskDelivers = true; cycleDay = l.start }) };
+          case 1 {
+            if (l.state != #recalled) return financingErr(#LoanNotIn({ loan = id; state = FT.loanStateText(l.state); wanted = "recalled" }));
+            let fee = Int.abs(FinancingCore.loanFeeTarget(l, l.returnDay)); let rebate = Int.abs(FinancingCore.loanRebateTarget(l, l.returnDay));
+            // the collateral and the rebate go back, the fee comes in: the cash leg is the net the desk pays
+            let net = l.cashCollateral + rebate;
+            #ok({ isin = l.isin; currency = l.currency; nominal = l.nominal; cash = if (net > fee) net - fee else 1; deskDelivers = false; cycleDay = l.returnDay })
+          };
+          case (_) financingErr(#InvalidTerms({ reason = "a loan has a start leg and a return leg" }));
+        }
+      };
+      case (#treasury) financingErr(#InvalidTerms({ reason = "a treasury deal is instructed by its own act" }));
     }
   };
   func custodyErr<X>(e : CuT.Error) : Res<X> { #err(#CustodyError({ error = e })) };
@@ -442,10 +605,17 @@ module {
           if (not e.paid) {
             let ?lot = TreasuryCore.row(s.treasury, e.lot) else return custodyErr(#LotNotIn({ lot = e.lot; state = "unknown" }));
             let ?cash = lotCash(bb, lot) else return custodyErr(#LotNotIn({ lot = e.lot; state = "terms not in the log" }));
-            switch (CustodyCore.planPay(s.custody, p, r, e, lot, cash, sec.currency, day)) {
+            // a lot out on loan: the lent part of a coupon or a distribution is a manufactured payment, a receivable from the borrower
+            let loans = FinancingCore.loansOfLot(s.financing, e.lot);
+            var lent = 0; for ((_, n) in loans.vals()) lent += n;
+            let manufactured : ?CustodyCore.Manufactured = if (lent == 0 or (r.kind != 1 and r.kind != 4)) null else {
+              switch (FinancingCore.policy(s.financing), loans.size()) { case (?fp, _) ?{ account = fp.manufacturedPaymentReceivable; sub = FinancingCore.loanSub(loans[0].0); lent }; case (_) null }
+            };
+            switch (CustodyCore.planPayWith(s.custody, p, r, e, lot, cash, sec.currency, day, manufactured)) {
               case (#err(err)) return custodyErr(err);
               case (#ok(pay)) {
-                let evs = switch (pay.treasury) { case (?te) [#treasury(te), #custody(pay.ev)]; case null [#custody(pay.ev)] };
+                var evs : [T.Event] = switch (pay.treasury) { case (?te) [#treasury(te), #custody(pay.ev)]; case null [#custody(pay.ev)] };
+                switch (manufactured) { case (?m) { let part = CustodyCore.manufacturedPart(e.amount, e.nominal, m.lent); if (part > 0) evs := Array.concat<T.Event>(evs, [#financing(#manufacturedPayment({ loan = loans[0].0; action = id; lot = e.lot; amount = part; day }))]) }; case null {} };
                 return #ok(?{ events = evs; legs = pay.legs; lot = ?e.lot; step = "pay" });
               };
             };
@@ -778,6 +948,104 @@ module {
           case (#err(e)) #err(e);
           case (#ok(plan)) #ok({ event = ?ev; extra = extras; journal = plan.journal });
         }
+      };
+      // ── financing ──
+      case (#setFinancingPolicy(pol)) {
+        for (code in FinancingCore.accountsOf(pol).vals()) { switch (JCore.getAccount(js, code)) { case null return #err(#UnknownAccount({ role = "financing policy"; account = code })); case (?_) {} } };
+        financingPlan(FinancingCore.planPolicy(pol))
+      };
+      case (#openRepo(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        switch (Auth.requireOpenBook(a, x.book)) { case (?e) return #err(e); case null {} };
+        if (FinancingCore.policy(s.financing) == null) return financingErr(#NoPolicy);
+        if (Auth.isShariaBook(a, x.book)) return callErr(#ShariaBook({ book = x.book }));
+        if (Text.encodeUtf8(x.counterparty.name).size() == 0 or Text.encodeUtf8(x.counterparty.name).size() > 64) return financingErr(#InvalidTerms({ reason = "the counterparty is named in 1..64 bytes" }));
+        if (Text.encodeUtf8(x.reference).size() > 64) return financingErr(#InvalidTerms({ reason = "the reference is at most 64 bytes" }));
+        switch (FinancingCore.validateRepo(x.terms, today)) { case (?e) return financingErr(e); case null {} };
+        if (TreasuryCore.security(s.treasury, x.terms.collateral.isin) == null) return treasuryErr(#UnknownSecurity({ isin = x.terms.collateral.isin }));
+        if (CustodyCore.depot(s.custody, x.terms.depot) == null) return custodyErr(#UnknownDepot({ depot = x.terms.depot }));
+        switch (JCore.getAccount(js, x.terms.cashAccount.account)) { case null return #err(#UnknownAccount({ role = "repo cash"; account = x.terms.cashAccount.account })); case (?_) {} };
+        only(#financing(#repoOpened({ book = x.book; counterparty = x.counterparty; terms = x.terms; reference = x.reference; trader = authority; day = today })))
+      };
+      case (#settleRepoLeg(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        switch (SettlementCore.openInstructionOf(s.settlement, x.repo, x.leg)) { case (?i) return settlementErr(#AlreadyInstructed({ deal = x.repo; instruction = i.id })); case null {} };
+        planRepoLeg(s, bb, js, journalCaller, now, x.repo, x.leg, authId, x.postingDate, x.valueDate, x.period, x.narration)
+      };
+      case (#resetRepoRate(x)) {
+        let r = switch (repoRow(s, x.repo)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        switch (requireNoOpenRun(s, r.book, x.valueDate)) { case (?e) return #err(e); case null {} };
+        let (_, _, cashOpt) = repoOpeningOf(bb, x.repo);
+        let ?cash = cashOpt else return financingErr(#UnknownRepo({ repo = x.repo }));
+        let ev = switch (FinancingCore.planRateReset(s.financing, x.repo, x.rateBps, x.valueDate)) { case (#err(e)) return financingErr(e); case (#ok(e)) e };
+        financingAct(s, js, journalCaller, now, ev, ?r, null, cash, [], "repo-reset", [authId, Nat.toText(x.repo), Nat.toText(x.valueDate)], x.postingDate, x.valueDate, x.period, x.narration)
+      };
+      case (#meetMarginCall(x)) {
+        let r = switch (repoRow(s, x.repo)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        switch (requireNoOpenRun(s, r.book, x.valueDate)) { case (?e) return #err(e); case null {} };
+        let (_, _, cashOpt) = repoOpeningOf(bb, x.repo);
+        let ?cash = cashOpt else return financingErr(#UnknownRepo({ repo = x.repo }));
+        let ?price = priceOf(s, r.isin, x.valueDate) else return financingErr(#NoPrice({ isin = r.isin; day = x.valueDate }));
+        let reference = "repo/" # Nat.toText(x.repo);
+        let (lots, custody) : ([(TT.DealId, Nat)], [T.Event]) = switch (x.collateral) {
+          case (?c) {
+            if (r.reverse) ([], [#custody(#collateralReceived({ isin = c.isin; depot = r.depot; nominal = c.nominal; reference; day = x.valueDate }))])
+            else {
+              let lots = switch (FinancingCore.allocate(CustodyCore.availableIn(s.custody, r.depot, c.isin), c.nominal, c.isin)) { case (#err(e)) return financingErr(e); case (#ok(x)) x };
+              (lots, Array.map<(TT.DealId, Nat), T.Event>(lots, func((lot, n)) { #custody(#pledged({ lot; depot = r.depot; nominal = n; reference; day = x.valueDate })) }))
+            }
+          };
+          case null ([], []);
+        };
+        let ev = switch (FinancingCore.planMeetMargin(s.financing, x.repo, x.cash, x.collateral, price, lots, x.valueDate)) { case (#err(e)) return financingErr(e); case (#ok(e)) e };
+        financingAct(s, js, journalCaller, now, ev, ?r, null, cash, custody, "repo-margin", [authId, Nat.toText(x.repo), Nat.toText(x.valueDate)], x.postingDate, x.valueDate, x.period, x.narration)
+      };
+      case (#substituteCollateral(x)) {
+        let r = switch (repoRow(s, x.repo)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        let ?price = priceOf(s, r.isin, today) else return financingErr(#NoPrice({ isin = r.isin; day = today }));
+        let reference = "repo/" # Nat.toText(x.repo);
+        if (r.reverse) {
+          let ev = switch (FinancingCore.planSubstitute(s.financing, x.repo, x.out, x.in_, price, price, [], [], today)) { case (#err(e)) return financingErr(e); case (#ok(e)) e };
+          return #ok({ event = ?#financing(ev); extra = [#custody(#collateralReturned({ isin = x.out.isin; depot = r.depot; nominal = x.out.nominal; reference; day = today })), #custody(#collateralReceived({ isin = x.in_.isin; depot = r.depot; nominal = x.in_.nominal; reference; day = today }))]; journal = [] });
+        };
+        // the pledged lots released for what goes out, first in first out over the repo's pledges; the new pledged from what is available
+        var left = x.out.nominal;
+        let outLots = List.empty<(TT.DealId, Nat)>();
+        for ((lot, n) in pledgedLots(s, r).vals()) { if (left > 0) { let q = Nat.min(left, n); List.add(outLots, (lot, q)); left -= q } };
+        if (left > 0) return financingErr(#InsufficientCollateral({ isin = x.out.isin; available = x.out.nominal - left; wanted = x.out.nominal }));
+        let inLots = switch (FinancingCore.allocate(CustodyCore.availableIn(s.custody, r.depot, x.in_.isin), x.in_.nominal, x.in_.isin)) { case (#err(e)) return financingErr(e); case (#ok(v)) v };
+        let ev = switch (FinancingCore.planSubstitute(s.financing, x.repo, x.out, x.in_, price, price, List.toArray(outLots), inLots, today)) { case (#err(e)) return financingErr(e); case (#ok(e)) e };
+        let custody = List.empty<T.Event>();
+        for ((lot, n) in List.values(outLots)) List.add(custody, #custody(#released({ lot; depot = r.depot; nominal = n; reference; day = today })));
+        for ((lot, n) in inLots.vals()) List.add(custody, #custody(#pledged({ lot; depot = r.depot; nominal = n; reference; day = today })));
+        #ok({ event = ?#financing(ev); extra = List.toArray(custody); journal = [] })
+      };
+      case (#openLoan(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        switch (Auth.requireOpenBook(a, x.book)) { case (?e) return #err(e); case null {} };
+        if (FinancingCore.policy(s.financing) == null) return financingErr(#NoPolicy);
+        if (Text.encodeUtf8(x.counterparty.name).size() == 0 or Text.encodeUtf8(x.counterparty.name).size() > 64) return financingErr(#InvalidTerms({ reason = "the counterparty is named in 1..64 bytes" }));
+        if (Text.encodeUtf8(x.reference).size() > 64) return financingErr(#InvalidTerms({ reason = "the reference is at most 64 bytes" }));
+        switch (FinancingCore.validateLoan(x.terms, today)) { case (?e) return financingErr(e); case null {} };
+        if (TreasuryCore.security(s.treasury, x.terms.isin) == null) return treasuryErr(#UnknownSecurity({ isin = x.terms.isin }));
+        if (CustodyCore.depot(s.custody, x.terms.depot) == null) return custodyErr(#UnknownDepot({ depot = x.terms.depot }));
+        switch (JCore.getAccount(js, x.terms.cashAccount.account)) { case null return #err(#UnknownAccount({ role = "loan cash"; account = x.terms.cashAccount.account })); case (?_) {} };
+        only(#financing(#loanOpened({ book = x.book; counterparty = x.counterparty; terms = x.terms; reference = x.reference; trader = authority; day = today })))
+      };
+      case (#settleLoanLeg(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        switch (SettlementCore.openInstructionOf(s.settlement, x.loan, x.leg)) { case (?i) return settlementErr(#AlreadyInstructed({ deal = x.loan; instruction = i.id })); case null {} };
+        planLoanLeg(s, bb, js, journalCaller, now, x.loan, x.leg, authId, x.postingDate, x.valueDate, x.period, x.narration)
+      };
+      case (#recallLoan(x)) {
+        let l = switch (loanRow(s, x.loan)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        let returnDay = nextBusinessDay(js)(today + l.noticeDays);
+        financingPlan(FinancingCore.planRecall(s.financing, x.loan, today, returnDay))
+      };
+      case (#instructFinancing(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        let amounts = switch (financingLegAmounts(s, x.family, x.id, x.leg, today)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+        settlementPlan(SettlementCore.planInstructFinancing(s.settlement, x.family, x.id, x.leg, amounts.isin, amounts.currency, amounts.nominal, amounts.cash, amounts.deskDelivers, amounts.cycleDay, x.counterparty, x.tradeId, x.reference, today))
       };
       case (#splitDeal(x)) {
         switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
@@ -1293,12 +1561,135 @@ module {
     if (onlyInstruction == null) record(acc, #settlement(#cycleClosed({ businessDate = day; settled; failed; pending; day })));
   };
 
+  /// The financing job: for every open repo and loan of the book, the start on its day (when no instruction has
+  /// it), the accrual to the day, the collateral marked at the day's price with the margin call it raises, the
+  /// unmet call past the grace alerted, the term repo closed at maturity and the loan returned on its day.
+  func jobFinancing(s : State, bb : Blocks, js : JCore.State, jb : JCore.Blocks, journalCaller : Principal, now : Nat64, acc : ChunkAcc, item : Batch.PlanItem, index : Nat, day : Nat, period : Text, book : Text, only : ?Nat) {
+    let ?p = FinancingCore.policy(s.financing) else return;
+    let nextDay = nextBusinessDay(js)(day + 1);
+    func postPlan(kind : Text, id : Nat, plan : Plan) : Bool {
+      switch (plan.event) { case (?ev) record(acc, ev); case null {} };
+      for (ev in plan.extra.vals()) record(acc, ev);
+      true
+    };
+    func postEvent(kind : Text, id : Nat, part : Text, ev : FT.Event, r : ?FinancingCore.RepoRow, l : ?FinancingCore.LoanRow, cash : TT.CashAccount, custody : [T.Event]) : Bool {
+      let legs = FinancingCore.legsOf(p, cash, r, l, ev);
+      if (legs.size() > 0) {
+        if (not Posting.balances(legs)) { fail(acc, index, item.job, book, id, kind # ": the legs do not balance"); return false };
+        let input : JT.PostingInput = { idempotencyKey = Posting.key(kind, [Nat.toText(id), part, Nat.toText(day)]); postingDate = day; valueDate = day; period; legs; sourceRef = { kind; id = Nat.toText(id) # "/" # part # "/" # Nat.toText(day) }; narration = kind # " " # Nat.toText(id); correctionOf = null };
+        switch (batchPost(js, jb, journalCaller, now, acc, input)) { case (?why) { fail(acc, index, item.job, book, id, why); return false }; case null {} };
+      };
+      record(acc, #financing(ev));
+      for (ev in custody.vals()) record(acc, ev);
+      true
+    };
+    for (r0 in FinancingCore.openReposInBook(s.financing, book).vals()) {
+      let mine = switch (only) { case null true; case (?e) e == r0.id };
+      if (not mine) continue;
+      acc.examined += 1;
+      let (_, _, cashOpt) = repoOpeningOf(bb, r0.id);
+      let ?cash = cashOpt else { fail(acc, index, item.job, book, r0.id, "the repo's terms are not in the log"); continue };
+      // the start, by the run, when its day has come and Tachyon does not have it
+      switch (FinancingCore.repo(s.financing, r0.id)) {
+        case (?r) {
+          if (r.state == #open and day >= r.start and SettlementCore.openInstructionOf(s.settlement, r.id, 0) == null) {
+            switch (repoStartCustody(s, r, day)) {
+              case (#err(e)) { fail(acc, index, item.job, book, r.id, debug_show e); continue };
+              case (#ok((lots, custody))) { if (not postEvent("repo-start", r.id, "s", #repoStarted({ repo = r.id; lots; day }), ?r, null, cash, custody)) continue };
+            };
+          };
+        };
+        case null continue;
+      };
+      // the accrual
+      switch (FinancingCore.planRepoDue(s.financing, r0.id, day)) {
+        case (#ok(?ev)) { switch (FinancingCore.repo(s.financing, r0.id)) { case (?r) { if (not postEvent("repo-accrual", r.id, "a", ev, ?r, null, cash, [])) continue }; case null {} } };
+        case (#ok(null)) {};
+        case (#err(e)) { fail(acc, index, item.job, book, r0.id, debug_show e); continue };
+      };
+      // the mark, the margin call, the unmet call
+      switch (FinancingCore.repo(s.financing, r0.id)) {
+        case (?r) {
+          // the mark, unless the repo closes today: the close returns every margin in full
+          if (r.state == #started and not (r.maturity != 0 and day >= r.maturity)) {
+            switch (priceOf(s, r.isin, day)) {
+              case (?price) { for (ev in FinancingCore.planMark(s.financing, r, price, day, nextDay).vals()) record(acc, #financing(ev)) };
+              case null { fail(acc, index, item.job, book, r.id, "no price for " # r.isin # " on day " # Nat.toText(day)); continue };
+            };
+            if (r.marginCalled > 0 and day >= r.marginDue + p.marginGraceDays) {
+              switch (alertFor(s, { rule = "repo.margin.unmet"; version = 1; account = r.id; day; postings = []; detail = "repo " # Nat.toText(r.id) # ": margin call of " # Nat.toText(r.marginCalled) # " due " # Nat.toText(r.marginDue) # " unmet" }, #endOfDay)) { case (?a) record(acc, a); case null {} };
+            };
+          };
+        };
+        case null {};
+      };
+      // the close at maturity, by the run, when Tachyon does not have it
+      switch (FinancingCore.repo(s.financing, r0.id)) {
+        case (?r) {
+          if (r.state == #started and r.maturity != 0 and day >= r.maturity and SettlementCore.openInstructionOf(s.settlement, r.id, 1) == null) {
+            switch (FinancingCore.planClose(s.financing, r.id, day)) {
+              case (#ok(ev)) ignore postEvent("repo-close", r.id, "c", ev, ?r, null, cash, repoCloseCustody(s, r, day));
+              case (#err(e)) fail(acc, index, item.job, book, r.id, debug_show e);
+            };
+          };
+        };
+        case null {};
+      };
+    };
+    for (l0 in FinancingCore.openLoansInBook(s.financing, book).vals()) {
+      let mine = switch (only) { case null true; case (?e) e == l0.id };
+      if (not mine) continue;
+      acc.examined += 1;
+      let (_, _, cashOpt) = loanOpeningOf(bb, l0.id);
+      let ?cash = cashOpt else { fail(acc, index, item.job, book, l0.id, "the loan's terms are not in the log"); continue };
+      let reference = "loan/" # Nat.toText(l0.id);
+      switch (FinancingCore.loan(s.financing, l0.id)) {
+        case (?l) {
+          if (l.state == #open and day >= l.start and SettlementCore.openInstructionOf(s.settlement, l.id, 0) == null) {
+            switch (FinancingCore.allocate(CustodyCore.availableIn(s.custody, l.depot, l.isin), l.nominal, l.isin)) {
+              case (#err(e)) { fail(acc, index, item.job, book, l.id, debug_show e); continue };
+              case (#ok(lots)) {
+                let custody = List.empty<T.Event>();
+                for ((lot, n) in lots.vals()) List.add(custody, #custody(#lent({ lot; depot = l.depot; nominal = n; reference; day })));
+                if (l.collateralNominal > 0) List.add(custody, #custody(#collateralReceived({ isin = l.collateralIsin; depot = l.depot; nominal = l.collateralNominal; reference; day })));
+                if (not postEvent("loan-start", l.id, "s", #loanStarted({ loan = l.id; lots; day }), null, ?l, cash, List.toArray(custody))) continue;
+              };
+            };
+          };
+        };
+        case null continue;
+      };
+      switch (FinancingCore.planLoanDue(s.financing, l0.id, day)) {
+        case (#ok(?ev)) { switch (FinancingCore.loan(s.financing, l0.id)) { case (?l) { if (not postEvent("loan-accrual", l.id, "a", ev, null, ?l, cash, [])) continue }; case null {} } };
+        case (#ok(null)) {};
+        case (#err(e)) { fail(acc, index, item.job, book, l0.id, debug_show e); continue };
+      };
+      switch (FinancingCore.loan(s.financing, l0.id)) {
+        case (?l) {
+          if (l.state == #recalled and day >= l.returnDay and SettlementCore.openInstructionOf(s.settlement, l.id, 1) == null) {
+            switch (FinancingCore.planReturn(s.financing, l.id, day)) {
+              case (#ok(ev)) {
+                let custody = List.empty<T.Event>();
+                for ((lot, n) in FinancingCore.lotsOfLoan(s.financing, l.id).vals()) List.add(custody, #custody(#lentReturned({ lot; depot = l.depot; nominal = n; reference; day })));
+                if (l.collateralNominal > 0) List.add(custody, #custody(#collateralReturned({ isin = l.collateralIsin; depot = l.depot; nominal = l.collateralNominal; reference; day })));
+                ignore postEvent("loan-return", l.id, "r", ev, null, ?l, cash, List.toArray(custody));
+              };
+              case (#err(e)) fail(acc, index, item.job, book, l.id, debug_show e);
+            };
+          };
+        };
+        case null {};
+      };
+    };
+  };
+
   func runItem(s : State, bb : Blocks, js : JCore.State, jb : JCore.Blocks, journalCaller : Principal, now : Nat64, acc : ChunkAcc, run : Eod.Run, item : Batch.PlanItem, index : Nat, day : Nat, onlyDeal : ?Nat) {
     let ?period = periodForDay(js, day) else { acc.examined += 1; fail(acc, index, item.job, run.book, 0, "no open period contains day " # Nat.toText(day)); return };
     if (Text.equal(item.job.name, Eod.JOB_TREASURY.name)) jobTreasury(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
     else if (Text.equal(item.job.name, Eod.JOB_CALLS.name)) jobCalls(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
     else if (Text.equal(item.job.name, Eod.JOB_CUSTODY.name)) jobCustody(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
     else if (Text.equal(item.job.name, Eod.JOB_SETTLEMENT.name)) jobSettlement(s, js, acc, item, index, day, run.book, onlyDeal)
+    else if (Text.equal(item.job.name, Eod.JOB_FINANCING.name)) jobFinancing(s, bb, js, jb, journalCaller, now, acc, item, index, day, period, run.book, onlyDeal)
     else fail(acc, index, item.job, run.book, 0, "unknown job " # item.job.name);
   };
 
@@ -1371,6 +1762,7 @@ module {
       case (#call(ce)) CallCore.fold(s.calls, block.index, ce);
       case (#custody(ce)) CustodyCore.fold(s.custody, block.index, ce, isinOfLot(s));
       case (#settlement(se)) SettlementCore.fold(s.settlement, block.index, se);
+      case (#financing(fe)) FinancingCore.fold(s.financing, block.index, fe);
       case (_) Auth.apply(s.authority, block);
     };
     if (block.index + 1 > s.height) s.height := block.index + 1;
@@ -1446,6 +1838,7 @@ module {
     CallCore.fingerprintInto(w, s.calls);
     CustodyCore.fingerprintInto(w, s.custody);
     SettlementCore.fingerprintInto(w, s.settlement);
+    FinancingCore.fingerprintInto(w, s.financing);
   };
   public func fingerprint(s : State) : Blob { let w = JC.Writer(); fingerprintInto(w, s); KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob()) };
   /// The fingerprint by section, so a divergence between the live state and a fresh fold names the sub-state.
@@ -1461,6 +1854,7 @@ module {
       one("calls", func(w) { CallCore.fingerprintInto(w, s.calls) }),
       one("custody", func(w) { CustodyCore.fingerprintInto(w, s.custody) }),
       one("settlement", func(w) { SettlementCore.fingerprintInto(w, s.settlement) }),
+      one("financing", func(w) { FinancingCore.fingerprintInto(w, s.financing) }),
     ]
   };
 

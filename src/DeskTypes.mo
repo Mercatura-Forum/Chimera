@@ -26,6 +26,7 @@ import AlT "mo:manticore/AlertTypes";
 import CallT "CallTypes";
 import CuT "CustodyTypes";
 import ST "SettlementTypes";
+import FT "FinancingTypes";
 
 module {
 
@@ -115,6 +116,17 @@ module {
     #buyIn : { instruction : ST.InstructionId; counterparty : TT.Counterparty; priceMicro : Nat; settlement : Day; reference : Text; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
     #cancelSettlement : { instruction : ST.InstructionId; ourConsent : Blob; theirConsent : Blob; reason : Text };
     #splitDeal : { deal : TT.DealId; parts : [Nat] };
+    // ── financing: repo, reverse repo and securities lending ──
+    #setFinancingPolicy : FT.Policy;
+    #openRepo : { book : BookId; counterparty : TT.Counterparty; terms : FT.RepoTerms; reference : Text };
+    #settleRepoLeg : { repo : FT.RepoId; leg : Nat; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    #resetRepoRate : { repo : FT.RepoId; rateBps : Nat; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    #meetMarginCall : { repo : FT.RepoId; cash : Nat; collateral : ?FT.Collateral; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    #substituteCollateral : { repo : FT.RepoId; out : FT.Collateral; in_ : FT.Collateral };
+    #openLoan : { book : BookId; counterparty : TT.Counterparty; terms : FT.LoanTerms; reference : Text };
+    #settleLoanLeg : { loan : FT.LoanId; leg : Nat; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    #recallLoan : { loan : FT.LoanId };
+    #instructFinancing : { family : ST.Family; id : Nat; leg : Nat; counterparty : Principal; tradeId : ?Nat; reference : Text };
     // ── treasury: the thirteen commands of Manticore's treasury domain, their bodies Manticore's ──
     #setTreasuryPolicy : TT.Policy;
     #registerSecurity : { terms : TT.SecurityTerms };
@@ -182,6 +194,7 @@ module {
     #call : CallT.Event;
     #custody : CuT.Event;
     #settlement : ST.Event;
+    #financing : FT.Event;
   };
 
   public type BatchError = {
@@ -253,6 +266,7 @@ module {
     #CallError : { error : CallT.Error };
     #CustodyError : { error : CuT.Error };
     #SettlementError : { error : ST.Error };
+    #FinancingError : { error : FT.Error };
     #MissingRate : { currency : Text; asOf : Day };
   };
 
@@ -348,6 +362,7 @@ module {
       case (#call(_)) "call";
       case (#custody(_)) "custody";
       case (#settlement(_)) "settlement";
+      case (#financing(_)) "financing";
     }
   };
 }

@@ -15,6 +15,7 @@ import TT "mo:manticore/TreasuryTypes";
 import CallT "../../src/CallTypes";
 import CuT "../../src/CustodyTypes";
 import ST "../../src/SettlementTypes";
+import FT "../../src/FinancingTypes";
 
 import T "../../src/DeskTypes";
 import Can "../../src/DeskCanonical";
@@ -44,10 +45,24 @@ module {
   public let announcement : CuT.Announcement = { isin = "EG0000012345"; kind = #coupon({ perHundredMicro = 6_000_000 }); recordDate = 20700; exDate = 20699; paymentDate = 20702; source = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob };
 
   public func venue() : ST.Venue { { core = bob(); deadlineSecs = 3600; recycleLimit = 3; claimsAccount = "1540" } };
-  public func instruction() : ST.Instruction { { deal = 40; leg = 0; cycle = 20672; role = #taker; counterparty = alice(); assetLedger = bob(); assetAmount = 10_000_000_00; cashLedger = alice(); cashAmount = 9_850_000_00; tradeId = ?7; reference = "security-1"; documentHash = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob } };
+  public func instruction() : ST.Instruction { { family = #treasury; deal = 40; leg = 0; cycle = 20672; role = #taker; counterparty = alice(); assetLedger = bob(); assetAmount = 10_000_000_00; cashLedger = alice(); cashAmount = 9_850_000_00; tradeId = ?7; reference = "security-1"; documentHash = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob } };
+
+  public let financingPolicy : FT.Policy = { repoPayable = "2600"; reverseRepoReceivable = "1600"; repoInterestPayable = "2610"; repoInterestReceivable = "1610"; repoInterestExpense = "5600"; repoInterestIncome = "4600"; marginCashGiven = "1620"; marginCashReceived = "2620"; lendingFeeReceivable = "1630"; lendingFeeIncome = "4630"; cashCollateralPayable = "2630"; rebateExpense = "5630"; manufacturedPaymentReceivable = "1640"; marginGraceDays = 2 };
+  public let repoTerms : FT.RepoTerms = { reverse = false; currency = "EGP"; cash = 9_500_000_00; rateBps = 1900; dayCount = #a004_Act365Fixed; start = 20670; maturity = ?20700; collateral = { isin = "EG0000012345"; nominal = 10_000_000_00 }; haircutBps = 500; thresholdBps = 200; cashAccount = cash; depot = "DEPOT-CITI" };
+  public let loanTerms : FT.LoanTerms = { isin = "EG0000012345"; nominal = 5_000_000_00; currency = "EGP"; valueMicro = 98_000_000; feeBps = 50; dayCount = #a004_Act365Fixed; collateral = #cash({ amount = 5_100_000_00; rebateBps = 1800 }); start = 20670; noticeDays = 3; cashAccount = cash; depot = "DEPOT-CITI" };
 
   public func samples() : [Freeze.Sample<T.Command>] {
     [
+      { family = "setFinancingPolicy"; command = #setFinancingPolicy(financingPolicy) },
+      { family = "openRepo"; command = #openRepo({ book = "BR01"; counterparty = citi; terms = repoTerms; reference = "repo-1" }) },
+      { family = "settleRepoLeg"; command = #settleRepoLeg({ repo = 80; leg = 0; postingDate = 20670; valueDate = 20670; period = "2026-08"; narration = "repo start" }) },
+      { family = "resetRepoRate"; command = #resetRepoRate({ repo = 80; rateBps = 1950; postingDate = 20675; valueDate = 20675; period = "2026-08"; narration = "reprice" }) },
+      { family = "meetMarginCall"; command = #meetMarginCall({ repo = 80; cash = 50_000_00; collateral = ?{ isin = "EG0000012345"; nominal = 200_000_00 }; postingDate = 20676; valueDate = 20676; period = "2026-08"; narration = "margin" }) },
+      { family = "substituteCollateral"; command = #substituteCollateral({ repo = 80; out = { isin = "EG0000012345"; nominal = 1_000_000_00 }; in_ = { isin = "EG0000012345"; nominal = 1_050_000_00 } }) },
+      { family = "openLoan"; command = #openLoan({ book = "BR01"; counterparty = citi; terms = loanTerms; reference = "loan-1" }) },
+      { family = "settleLoanLeg"; command = #settleLoanLeg({ loan = 81; leg = 1; postingDate = 20690; valueDate = 20690; period = "2026-08"; narration = "loan return" }) },
+      { family = "recallLoan"; command = #recallLoan({ loan = 81 }) },
+      { family = "instructFinancing"; command = #instructFinancing({ family = #repo; id = 80; leg = 1; counterparty = alice(); tradeId = ?9; reference = "repo-1/close" }) },
       { family = "setSettlementVenue"; command = #setSettlementVenue({ venue = venue() }) },
       { family = "setSettlementLedger"; command = #setSettlementLedger({ declaration = { role = #security({ isin = "EG0000012345" }); ledger = bob(); partial = true } }) },
       { family = "openSettlementCycle"; command = #openSettlementCycle({ cycle = { businessDate = 20672; market = "EGX"; priceSource = "EGX closing" } }) },
@@ -195,6 +210,28 @@ module {
       #settlement(#cancelled({ instruction = 90; ourConsent = h(1); theirConsent = h(2); reason = "both parties agree"; day = 20675 })),
       #settlement(#statusReceived({ instruction = 90; status = "SttlmSts/Pdg"; quantity = 10_000_000_00; amount = 9_850_000_00; matched = true; documentHash = h(6); day = 20671 })),
       #settlement(#split({ deal = 40; parts = [6_000_000_00, 4_000_000_00]; day = 20670 })),
+      #custody(#pledged({ lot = 40; depot = "DEPOT-CITI"; nominal = 1_000_000_00; reference = "repo/80"; day = 20670 })),
+      #custody(#released({ lot = 40; depot = "DEPOT-CITI"; nominal = 1_000_000_00; reference = "repo/80"; day = 20700 })),
+      #custody(#lent({ lot = 40; depot = "DEPOT-CITI"; nominal = 500_000_00; reference = "loan/81"; day = 20670 })),
+      #custody(#lentReturned({ lot = 40; depot = "DEPOT-CITI"; nominal = 500_000_00; reference = "loan/81"; day = 20690 })),
+      #custody(#collateralReceived({ isin = "EG0000012345"; depot = "DEPOT-CITI"; nominal = 2_000_000_00; reference = "repo/82"; day = 20670 })),
+      #custody(#collateralReturned({ isin = "EG0000012345"; depot = "DEPOT-CITI"; nominal = 2_000_000_00; reference = "repo/82"; day = 20700 })),
+      #financing(#policySet(financingPolicy)),
+      #financing(#repoOpened({ book = "BR01"; counterparty = citi; terms = repoTerms; reference = "repo-1"; trader = alice(); day = 20670 })),
+      #financing(#repoStarted({ repo = 80; lots = [(40, 6_000_000_00), (41, 4_000_000_00)]; day = 20670 })),
+      #financing(#repoAccrued({ repo = 80; interest = 49_452_05; day = 20671 })),
+      #financing(#repoRateReset({ repo = 80; rateBps = 1950; day = 20675; catchUp = 123 })),
+      #financing(#collateralMarked({ repo = 80; value = 9_300_000_00; exposure = 9_520_000_00; priceMicro = 97_900_000; day = 20676 })),
+      #financing(#marginCallRaised({ repo = 80; amount = 220_000_00; payer = #desk; day = 20676; due = 20677 })),
+      #financing(#marginMet({ repo = 80; cash = 20_000_00; collateral = ?{ isin = "EG0000012345"; nominal = 200_000_00 }; lots = [(42, 200_000_00)]; payer = #desk; day = 20677 })),
+      #financing(#collateralSubstituted({ repo = 80; out = { isin = "EG0000012345"; nominal = 1_000_000_00 }; in_ = { isin = "EG0000012345"; nominal = 1_050_000_00 }; outLots = [(40, 1_000_000_00)]; inLots = [(43, 1_050_000_00)]; day = 20680 })),
+      #financing(#repoClosed({ repo = 80; principal = 9_500_000_00; interest = 148_356_16; marginReturned = -20_000_00; day = 20700 })),
+      #financing(#loanOpened({ book = "BR01"; counterparty = citi; terms = loanTerms; reference = "loan-1"; trader = alice(); day = 20670 })),
+      #financing(#loanStarted({ loan = 81; lots = [(40, 5_000_000_00)]; day = 20670 })),
+      #financing(#loanAccrued({ loan = 81; fee = 671; rebate = 25_150; day = 20671 })),
+      #financing(#loanRecalled({ loan = 81; day = 20686; returnDay = 20690 })),
+      #financing(#loanReturned({ loan = 81; fee = 13_425; rebate = 503_013; day = 20690 })),
+      #financing(#manufacturedPayment({ loan = 81; action = 70; lot = 40; amount = 30_000_00; day = 20688 })),
     ]
   };
 }

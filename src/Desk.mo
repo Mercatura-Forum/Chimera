@@ -65,6 +65,8 @@ import CustodyCore "CustodyCore";
 import ST "SettlementTypes";
 import SettlementCore "SettlementCore";
 import SettlementMessages "SettlementMessages";
+import FT "FinancingTypes";
+import FinancingCore "FinancingCore";
 import DT "mo:tachyon/DvpTypes";
 import ICRC "mo:tachyon/ICRC";
 import Map "mo:core/Map";
@@ -856,7 +858,10 @@ shared (initMsg) persistent actor class Desk(init : {
   public query func settlementVenue() : async ?ST.Venue { SettlementCore.venue(desk.settlement) };
   public query func settlementLedgers() : async [ST.LedgerDeclaration] { SettlementCore.ledgers(desk.settlement) };
   public query func settlementCycle(businessDate : Nat) : async ?ST.CycleView { switch (SettlementCore.cycle(desk.settlement, businessDate)) { case (?c) ?SettlementCore.cycleView(c); case null null } };
-  func instructionView(r : SettlementCore.InstructionRow) : ST.InstructionView { SettlementCore.view(r, Core.treasuryCaptureOf(deskBlocks(), r.deal).1) };
+  func instructionView(r : SettlementCore.InstructionRow) : ST.InstructionView {
+    let reference = switch (r.family) { case (#treasury) Core.treasuryCaptureOf(deskBlocks(), r.deal).1; case (#repo) Core.repoOpeningOf(deskBlocks(), r.deal).1; case (#loan) Core.loanOpeningOf(deskBlocks(), r.deal).1 };
+    SettlementCore.view(r, reference)
+  };
   public query func settlementInstruction(id : Nat) : async ?ST.InstructionView { switch (SettlementCore.instruction(desk.settlement, id)) { case (?r) ?instructionView(r); case null null } };
   public query func settlementOfDeal(deal : Nat) : async ?ST.InstructionView { switch (SettlementCore.instructionOfDeal(desk.settlement, deal, 0)) { case (?r) ?instructionView(r); case null null } };
   public query func settlementsOfCycle(businessDate : Nat) : async [ST.InstructionView] { Array.map<SettlementCore.InstructionRow, ST.InstructionView>(SettlementCore.instructionsOfCycle(desk.settlement, businessDate), instructionView) };
@@ -865,20 +870,53 @@ shared (initMsg) persistent actor class Desk(init : {
   /// The instruction's status advice as sese.024.001.09, or its confirmation as sese.025.001.09 once settled.
   func instructionMessage(id : Nat, confirmation : Bool) : ?Text {
     let ?i = SettlementCore.instruction(desk.settlement, id) else return null;
-    let ?r = TreasuryCore.row(desk.treasury, i.deal) else return null;
-    let ?sec = TreasuryCore.security(desk.treasury, r.isin) else return null;
-    let (_, reference) = Core.treasuryCaptureOf(deskBlocks(), i.deal);
+    // the instrument, the reference, the trade day and the safekeeping account of the leg's subject
+    let (isin, reference, tradeDay, account) : (Text, Text, Nat, Text) = switch (i.family) {
+      case (#treasury) { let ?r = TreasuryCore.row(desk.treasury, i.deal) else return null; (r.isin, Core.treasuryCaptureOf(deskBlocks(), i.deal).1, r.start, Core.safekeepingAccountOf(desk, i.deal)) };
+      case (#repo) { let ?r = FinancingCore.repo(desk.financing, i.deal) else return null; (r.isin, Core.repoOpeningOf(deskBlocks(), i.deal).1, i.cycle, switch (CustodyCore.depot(desk.custody, r.depot)) { case (?d) d.safekeepingAccount; case null r.depot }) };
+      case (#loan) { let ?l = FinancingCore.loan(desk.financing, i.deal) else return null; (l.isin, Core.loanOpeningOf(deskBlocks(), i.deal).1, i.cycle, switch (CustodyCore.depot(desk.custody, l.depot)) { case (?d) d.safekeepingAccount; case null l.depot }) };
+    };
+    let ?sec = TreasuryCore.security(desk.treasury, isin) else return null;
     let receive = i.role == #taker;
-    let account = Core.safekeepingAccountOf(desk, i.deal);
     if (confirmation) {
       if (i.state != #settled) return null;
       let effective = switch (deskBlock(i.lastBlock)) { case (?b) { switch (b.event) { case (#settlement(#settled(x))) x.day; case (_) i.cycle } }; case null i.cycle };
-      ?SettlementMessages.sese025Xml(reference, i.tradeId, account, r.isin, i.assetAmount, sec.currency, i.cashAmount, minorUnits(sec.currency), r.start, effective, receive)
+      ?SettlementMessages.sese025Xml(reference, i.tradeId, account, isin, i.assetAmount, sec.currency, i.cashAmount, minorUnits(sec.currency), tradeDay, effective, receive)
     } else {
-      ?SettlementMessages.sese024Xml(reference, if (i.tradeId == 0) null else ?i.tradeId, SettlementMessages.statusOf(i.state, i.role, i.fails), account, r.isin, i.assetAmount, sec.currency, i.cashAmount, minorUnits(sec.currency), r.start, receive)
+      ?SettlementMessages.sese024Xml(reference, if (i.tradeId == 0) null else ?i.tradeId, SettlementMessages.statusOf(i.state, i.role, i.fails), account, isin, i.assetAmount, sec.currency, i.cashAmount, minorUnits(sec.currency), tradeDay, receive)
     }
   };
   public query func settlementStatusAdvice(id : Nat) : async ?Text { instructionMessage(id, false) };
+
+  // ─── financing reads ───
+  public query func financingPolicy() : async ?FT.Policy { FinancingCore.policy(desk.financing) };
+  func repoView(r : FinancingCore.RepoRow) : FT.RepoView { let (cp, reference, _) = Core.repoOpeningOf(deskBlocks(), r.id); FinancingCore.repoView(r, cp, reference) };
+  func loanView(r : FinancingCore.LoanRow) : FT.LoanView { let (cp, reference, _) = Core.loanOpeningOf(deskBlocks(), r.id); FinancingCore.loanView(r, cp, reference) };
+  public shared query ({ caller }) func repo(id : Nat) : async Result.Result<?FT.RepoView, T.Error> {
+    switch (FinancingCore.repo(desk.financing, id)) {
+      case (?r) { if (not Auth.mayReadBook(readScope(caller), r.book)) return #err(#OutsideBookScope({ book = r.book })); #ok(?repoView(r)) };
+      case null #ok(null);
+    }
+  };
+  public shared query ({ caller }) func reposOfBook(book : T.BookId) : async Result.Result<[FT.RepoView], T.Error> {
+    if (not Auth.mayReadBook(readScope(caller), book)) return #err(#OutsideBookScope({ book }));
+    #ok(Array.map<FinancingCore.RepoRow, FT.RepoView>(FinancingCore.reposOfBook(desk.financing, book), repoView))
+  };
+  public query func repoPledges(id : Nat) : async [(Nat, Nat)] { FinancingCore.lotsOfRepo(desk.financing, id) };
+  public shared query ({ caller }) func loan(id : Nat) : async Result.Result<?FT.LoanView, T.Error> {
+    switch (FinancingCore.loan(desk.financing, id)) {
+      case (?r) { if (not Auth.mayReadBook(readScope(caller), r.book)) return #err(#OutsideBookScope({ book = r.book })); #ok(?loanView(r)) };
+      case null #ok(null);
+    }
+  };
+  public shared query ({ caller }) func loansOfBook(book : T.BookId) : async Result.Result<[FT.LoanView], T.Error> {
+    if (not Auth.mayReadBook(readScope(caller), book)) return #err(#OutsideBookScope({ book }));
+    #ok(Array.map<FinancingCore.LoanRow, FT.LoanView>(FinancingCore.loansOfBook(desk.financing, book), loanView))
+  };
+  public query func loanLots(id : Nat) : async [(Nat, Nat)] { FinancingCore.lotsOfLoan(desk.financing, id) };
+  public query func financingStatus() : async FT.Status { FinancingCore.status(desk.financing) };
+  /// A depot's position in an instrument with what is pledged or lent and what is held for a counterparty.
+  public query func depotAvailable(depotId : Text, isin : Text) : async CuT.AvailableView { CustodyCore.availableView(desk.custody, depotId, isin) };
   public query func settlementConfirmation(id : Nat) : async ?Text { instructionMessage(id, true) };
 
   // ═══════════════════════════════════════════════════════

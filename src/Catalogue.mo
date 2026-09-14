@@ -94,6 +94,17 @@ module {
       p("settlement.buyin", "settlement", #update, #command("buyIn"), true, true),
       p("settlement.cancel", "settlement", #update, #command("cancelSettlement"), true, true),
       p("settlement.split", "settlement", #update, #command("splitDeal"), true, true),
+      // ── financing: repo, reverse repo and securities lending ──
+      p("financing.policy", "financing", #update, #command("setFinancingPolicy"), false, true),
+      p("repo.open", "repo", #create, #command("openRepo"), false, false),
+      p("repo.settle", "repo", #update, #command("settleRepoLeg"), true, true),
+      p("repo.rate.reset", "repo", #update, #command("resetRepoRate"), true, true),
+      p("repo.margin.meet", "repo", #update, #command("meetMarginCall"), true, true),
+      p("repo.collateral.substitute", "repo", #update, #command("substituteCollateral"), false, true),
+      p("loan.open", "loan", #create, #command("openLoan"), false, false),
+      p("loan.settle", "loan", #update, #command("settleLoanLeg"), true, true),
+      p("loan.recall", "loan", #update, #command("recallLoan"), false, true),
+      p("settlement.instruct.financing", "settlement", #create, #command("instructFinancing"), true, true),
       // ── treasury (Manticore's rows, verbatim) ──
       p("treasury.policy", "treasury", #update, #command("setTreasuryPolicy"), false, true),
       p("treasury.security.register", "treasury", #create, #command("registerSecurity"), false, true),
@@ -165,6 +176,16 @@ module {
       case (#buyIn(_)) "buyIn";
       case (#cancelSettlement(_)) "cancelSettlement";
       case (#splitDeal(_)) "splitDeal";
+      case (#setFinancingPolicy(_)) "setFinancingPolicy";
+      case (#openRepo(_)) "openRepo";
+      case (#settleRepoLeg(_)) "settleRepoLeg";
+      case (#resetRepoRate(_)) "resetRepoRate";
+      case (#meetMarginCall(_)) "meetMarginCall";
+      case (#substituteCollateral(_)) "substituteCollateral";
+      case (#openLoan(_)) "openLoan";
+      case (#settleLoanLeg(_)) "settleLoanLeg";
+      case (#recallLoan(_)) "recallLoan";
+      case (#instructFinancing(_)) "instructFinancing";
       case (#setTreasuryPolicy(_)) "setTreasuryPolicy";
       case (#registerSecurity(_)) "registerSecurity";
       case (#publishCurve(_)) "publishCurve";
@@ -192,6 +213,7 @@ module {
       "revaluePositions", "openCall", "resetCallRate", "adjustCallBalance", "serveCallNotice", "settleCall",
       "setCustodyPolicy", "extendInstrument", "openDepot", "setBookDepot", "assignDealDepot", "transferDepot", "announceCorporateAction", "cancelCorporateAction", "processCorporateAction",
       "setSettlementVenue", "setSettlementLedger", "openSettlementCycle", "instructSettlement", "setInstructionTrade", "recycleSettlement", "recordSettlementStatus", "buyIn", "cancelSettlement", "splitDeal",
+      "setFinancingPolicy", "openRepo", "settleRepoLeg", "resetRepoRate", "meetMarginCall", "substituteCollateral", "openLoan", "settleLoanLeg", "recallLoan", "instructFinancing",
       "setTreasuryPolicy", "registerSecurity", "publishCurve", "setTreasuryLimit", "registerNostro", "captureDeal", "confirmDeal", "amendDeal", "cancelDeal",
       "settleDealLeg", "markDeal", "recordNostroStatement", "resolveNostroBreak",
     ]
