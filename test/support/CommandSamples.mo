@@ -23,6 +23,7 @@ import RT "../../src/ReconciliationTypes";
 import LQ "../../src/LiquidityTypes";
 import FeT "../../src/FeedTypes";
 import MkT "../../src/MarketTypes";
+import CvT "../../src/CurveTypes";
 import FV "FeedVectors";
 
 import T "../../src/DeskTypes";
@@ -92,6 +93,13 @@ module {
   public func feed() : FeT.Feed { { isin = "EG0000012345"; sources = [{ id = "BLOOMBERG"; publicKey = FV.publicKey }, { id = "REUTERS"; publicKey = FV.publicKey }, { id = "CBE"; publicKey = FV.publicKey }]; bandBps = 100; staleSeconds = 600 } };
   public func submission() : FeT.Submission { { isin = FV.isin; source = FV.source; priceMicro = FV.priceMicro; asOf = FV.asOf; signature = FV.signature } };
   public func market() : MkT.Market { { isin = "EG0000012345"; engine = bob(); sharesLedger = alice(); cashLedger = bob(); currency = "EGP"; unitNominal = 10_000; deadlineSecs = 86_400; participants = [{ principal = alice(); counterparty = citi }] } };
+  public func curveSpec() : CvT.Spec {
+    { id = "EGP-OIS"; currency = "EGP"; role = #discount; dayCount = #a003_Act360; interpolation = #logLinearDiscount; discountCurve = null;
+      quotes = [{ instrument = #deposit({ days = 7 }); value = 1990; source = h(1) }, { instrument = #fra({ startDays = 90; endDays = 180 }); value = 2040; source = h(2) },
+                { instrument = #future({ startDays = 180; endDays = 270; convexityBps = 2 }); value = 2055; source = h(3) }, { instrument = #swap({ months = 24; fixedMonths = 12; floatMonths = 3 }); value = 2150; source = h(4) },
+                { instrument = #ois({ months = 12; fixedMonths = 12 }); value = 2100; source = h(5) }, { instrument = #basis({ months = 36; reference = "P-EGP-3M"; spreadOnReference = true }); value = 12; source = h(6) },
+                { instrument = #fxSwap({ days = 365; spotMicro = 48_000_000 }); value = 2_150_000; source = h(7) }] }
+  };
   public func orderTerms() : MkT.OrderTerms { { book = "BR01"; isin = "EG0000012345"; side = #buy; units = 500; classification = #fvoci; cash = cash; reference = "order-1" } };
   public func samples() : [Freeze.Sample<T.Command>] {
     [
@@ -102,6 +110,8 @@ module {
       { family = "stageOrder"; command = #stageOrder({ terms = orderTerms(); approver = null }) },
       { family = "cancelOrder"; command = #cancelOrder({ order = 210; reason = "withdrawn by the trader" }) },
       { family = "openMarketCycle"; command = #openMarketCycle({ isin = "EG0000012345"; approver = ?alice() }) },
+      { family = "buildCurve"; command = #buildCurve({ spec = curveSpec() }) },
+      { family = "setIndexCurves"; command = #setIndexCurves({ index = "CBE-3M"; projection = "EGP-3M"; discount = "EGP-OIS" }) },
       { family = "setReconciliationPolicy"; command = #setReconciliationPolicy(reconciliationPolicy) },
       { family = "recordNostroNotification"; command = #recordNostroNotification({ nostro = "NOSTRO-USD-CITI"; document = h(5) }) },
       { family = "recordDepotStatement"; command = #recordDepotStatement({ depot = "DEPOT-CITI"; document = h(6) }) },
@@ -403,6 +413,10 @@ module {
       #market(#orderWithdrawn({ cycle = 220; order = 211; engineOrder = 8; day = 20672 })),
       #market(#callRefused({ cycle = 220; step = "submitOrder"; reason = "the engine did not answer"; day = 20672 })),
       #market(#cycleClosed({ cycle = 220; fills = 2; unfilled = [211]; day = 20672 })),
+      #curve(#curveBuilt({ spec = curveSpec(); day = 20672; nodes = [{ days = 7; df = 996_145_470_443_533_771 }, { days = 180; df = 905_735_160_321_916_391 }]; iterations = 61 })),
+      #curve(#curveBuilt({ spec = { curveSpec() with id = "EGP-3M"; role = #projection({ indexMonths = 3 }); interpolation = #linearZero; discountCurve = ?"EGP-OIS" }; day = 20672; nodes = []; iterations = 0 })),
+      #curve(#indexCurvesSet({ index = "CBE-3M"; projection = "EGP-3M"; discount = "EGP-OIS"; day = 20672 })),
+      #curve(#swapMarked({ deal = 45; day = 20673; discount = "EGP-OIS"; projection = "EGP-3M"; value = -71_151_120 })),
     ]
   };
 }

@@ -15,6 +15,8 @@ module {
       { family = "stageOrder"; version = 1; hex = "c03e168af7e56f1751d8db1117f54b098da9b79285ded4554414d8126357b3ce" },
       { family = "cancelOrder"; version = 1; hex = "548057c37f80e43070f447f54a586c0760ea585b1ae354f51eea277c4cbe1f3c" },
       { family = "openMarketCycle"; version = 1; hex = "d4e7827eb1bd910c1f5448cce08104e2cb71bc25fa56d9e7663bb9a9614bc749" },
+      { family = "buildCurve"; version = 1; hex = "f0e26cd955d1eb8f014660aa4e770773c56b6bc57fd6fa3621630ea4e88fd1c4" },
+      { family = "setIndexCurves"; version = 1; hex = "093d714e23172389c28f241e9585cfb0e45332be52b4b2a06ebe1beaa883d849" },
       { family = "setReconciliationPolicy"; version = 1; hex = "ca7825795b1d03b2ef55b42305f23bd4f605218f10d2430e994e81a970bab7ff" },
       { family = "recordNostroNotification"; version = 1; hex = "fb2332948567ff82255bfff99e14710e116d9f68f5184d997427e480f75e8cec" },
       { family = "recordDepotStatement"; version = 1; hex = "0335b12d0021c78ebc737ec7e2937cbc5a2b7cc6a324f8b294ff28b253d90ede" },

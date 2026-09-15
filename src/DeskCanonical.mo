@@ -45,6 +45,7 @@ import RT "ReconciliationTypes";
 import LQ "LiquidityTypes";
 import FeT "FeedTypes";
 import MkT "MarketTypes";
+import CvT "CurveTypes";
 import TT "mo:manticore/TreasuryTypes";
 
 import T "DeskTypes";
@@ -585,6 +586,78 @@ module {
   };
   func wHalt(w : JC.Writer, x : FeT.HaltReason) { w.byte(switch (x) { case (#disagreement) 1; case (#stale) 2 }) };
   func rHalt(r : JC.Reader) : ?FeT.HaltReason { switch (r.byte()) { case (?1) ?#disagreement; case (?2) ?#stale; case (_) null } };
+  // ─── curves ───
+  func wInstrument(w : JC.Writer, i : CvT.Instrument) {
+    switch (i) {
+      case (#deposit(x)) { w.byte(1); w.nat(x.days) };
+      case (#fra(x)) { w.byte(2); w.nat(x.startDays); w.nat(x.endDays) };
+      case (#future(x)) { w.byte(3); w.nat(x.startDays); w.nat(x.endDays); wInt(w, x.convexityBps) };
+      case (#swap(x)) { w.byte(4); w.nat(x.months); w.nat(x.fixedMonths); w.nat(x.floatMonths) };
+      case (#ois(x)) { w.byte(5); w.nat(x.months); w.nat(x.fixedMonths) };
+      case (#basis(x)) { w.byte(6); w.nat(x.months); w.text(x.reference); w.byte(if (x.spreadOnReference) 1 else 0) };
+      case (#fxSwap(x)) { w.byte(7); w.nat(x.days); w.nat(x.spotMicro) };
+    }
+  };
+  func rInstrument(r : JC.Reader) : ?CvT.Instrument {
+    switch (r.byte()) {
+      case (?1) { let ?days = r.nat() else return null; ?#deposit({ days }) };
+      case (?2) { let ?startDays = r.nat() else return null; let ?endDays = r.nat() else return null; ?#fra({ startDays; endDays }) };
+      case (?3) { let ?startDays = r.nat() else return null; let ?endDays = r.nat() else return null; let ?convexityBps = rInt(r) else return null; ?#future({ startDays; endDays; convexityBps }) };
+      case (?4) { let ?months = r.nat() else return null; let ?fixedMonths = r.nat() else return null; let ?floatMonths = r.nat() else return null; ?#swap({ months; fixedMonths; floatMonths }) };
+      case (?5) { let ?months = r.nat() else return null; let ?fixedMonths = r.nat() else return null; ?#ois({ months; fixedMonths }) };
+      case (?6) { let ?months = r.nat() else return null; let ?reference = r.text() else return null; let ?b = r.byte() else return null; if (b > 1) return null; ?#basis({ months; reference; spreadOnReference = b == 1 }) };
+      case (?7) { let ?days = r.nat() else return null; let ?spotMicro = r.nat() else return null; ?#fxSwap({ days; spotMicro }) };
+      case (_) null;
+    }
+  };
+  public func wCurveSpec(w : JC.Writer, s : CvT.Spec) {
+    w.text(s.id); w.text(s.currency);
+    switch (s.role) { case (#discount) w.byte(1); case (#projection(p)) { w.byte(2); w.nat(p.indexMonths) }; case (#collateralDiscount(c)) { w.byte(3); w.text(c.collateral) } };
+    PC.wConvention(w, s.dayCount);
+    w.byte(switch (s.interpolation) { case (#logLinearDiscount) 1; case (#linearZero) 2 });
+    wOptText(w, s.discountCurve);
+    w.len16(s.quotes.size());
+    for (q in s.quotes.vals()) { wInstrument(w, q.instrument); wInt(w, q.value); w.blob(q.source) };
+  };
+  func rCurveSpec(r : JC.Reader) : ?CvT.Spec {
+    let ?id = r.text() else return null; let ?currency = r.text() else return null;
+    let ?role : ?CvT.Role = switch (r.byte()) { case (?1) ?#discount; case (?2) { let ?m = r.nat() else return null; ?#projection({ indexMonths = m }) }; case (?3) { let ?c = r.text() else return null; ?#collateralDiscount({ collateral = c }) }; case (_) null } else return null;
+    let ?dayCount = PC.rConvention(r) else return null;
+    let ?interpolation : ?CvT.Interpolation = switch (r.byte()) { case (?1) ?#logLinearDiscount; case (?2) ?#linearZero; case (_) null } else return null;
+    let ?discountCurve = rOptText(r) else return null;
+    let ?n = r.len16() else return null;
+    let quotes = List.empty<CvT.Quote>();
+    var i = 0;
+    while (i < n) {
+      let ?instrument = rInstrument(r) else return null; let ?value = rInt(r) else return null; let ?source = r.blob() else return null;
+      List.add(quotes, { instrument; value; source }); i += 1;
+    };
+    ?{ id; currency; role; dayCount; interpolation; discountCurve; quotes = List.toArray(quotes) }
+  };
+  func wNodes(w : JC.Writer, ns : [CvT.Node]) { w.len16(ns.size()); for (n in ns.vals()) { w.nat(n.days); w.nat(n.df) } };
+  func rNodes(r : JC.Reader) : ?[CvT.Node] {
+    let ?n = r.len16() else return null;
+    let out = List.empty<CvT.Node>();
+    var i = 0;
+    while (i < n) { let ?days = r.nat() else return null; let ?df = r.nat() else return null; List.add(out, { days; df }); i += 1 };
+    ?List.toArray(out)
+  };
+  func wCurveEvent(w : JC.Writer, e : CvT.Event) {
+    switch (e) {
+      case (#curveBuilt(x)) { w.byte(0x01); wCurveSpec(w, x.spec); w.nat(x.day); wNodes(w, x.nodes); w.nat(x.iterations) };
+      case (#indexCurvesSet(x)) { w.byte(0x02); w.text(x.index); w.text(x.projection); w.text(x.discount); w.nat(x.day) };
+      case (#swapMarked(x)) { w.byte(0x03); w.nat(x.deal); w.nat(x.day); w.text(x.discount); w.text(x.projection); wInt(w, x.value) };
+    }
+  };
+  func rCurveEvent(r : JC.Reader) : ?CvT.Event {
+    switch (r.byte()) {
+      case (?0x01) { let ?spec = rCurveSpec(r) else return null; let ?day = r.nat() else return null; let ?nodes = rNodes(r) else return null; let ?iterations = r.nat() else return null; ?#curveBuilt({ spec; day; nodes; iterations }) };
+      case (?0x02) { let ?index = r.text() else return null; let ?projection = r.text() else return null; let ?discount = r.text() else return null; let ?day = r.nat() else return null; ?#indexCurvesSet({ index; projection; discount; day }) };
+      case (?0x03) { let ?deal = r.nat() else return null; let ?day = r.nat() else return null; let ?discount = r.text() else return null; let ?projection = r.text() else return null; let ?value = rInt(r) else return null; ?#swapMarked({ deal; day; discount; projection; value }) };
+      case (_) null;
+    }
+  };
+
   func wFeedEvent(w : JC.Writer, e : FeT.Event) {
     switch (e) {
       case (#feedDeclared(x)) { w.byte(0x01); wFeed(w, x.feed); w.nat(x.day) };
@@ -833,6 +906,8 @@ module {
       case (#transferDepot(x)) { w.byte(0x55); w.nat(x.lot); w.text(x.from); w.text(x.to); w.nat(x.nominal); w.text(x.reference) };
       case (#setDepotAccount(x)) { w.byte(0x59); w.text(x.depot); TyCan.writeOptPrincipal(w, x.account) };
       case (#instructDepotTransfer(x)) { w.byte(0x5A); w.nat(x.lot); w.text(x.from); w.text(x.to); w.nat(x.nominal); w.optNat(x.deliveryId); w.text(x.reference) };
+      case (#buildCurve(x)) { w.byte(0x5B); wCurveSpec(w, x.spec) };
+      case (#setIndexCurves(x)) { w.byte(0x5C); w.text(x.index); w.text(x.projection); w.text(x.discount) };
       case (#announceCorporateAction(x)) { w.byte(0x56); wAnnouncement(w, x.announcement) };
       case (#cancelCorporateAction(x)) { w.byte(0x57); w.nat(x.action); w.text(x.reason) };
       case (#processCorporateAction(x)) { w.byte(0x58); w.nat(x.action); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
@@ -971,6 +1046,8 @@ module {
       case 0x55 { let ?lot = r.nat() else return null; let ?from = r.text() else return null; let ?to = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; ?#transferDepot({ lot; from; to; nominal; reference }) };
       case 0x59 { let ?depot = r.text() else return null; let ?account = TyCan.readOptPrincipal(r) else return null; ?#setDepotAccount({ depot; account }) };
       case 0x5A { let ?lot = r.nat() else return null; let ?from = r.text() else return null; let ?to = r.text() else return null; let ?nominal = r.nat() else return null; let ?deliveryId = r.optNat() else return null; let ?reference = r.text() else return null; ?#instructDepotTransfer({ lot; from; to; nominal; deliveryId; reference }) };
+      case 0x5B { let ?spec = rCurveSpec(r) else return null; ?#buildCurve({ spec }) };
+      case 0x5C { let ?index = r.text() else return null; let ?projection = r.text() else return null; let ?discount = r.text() else return null; ?#setIndexCurves({ index; projection; discount }) };
       case 0x56 { let ?announcement = rAnnouncement(r) else return null; ?#announceCorporateAction({ announcement }) };
       case 0x57 { let ?action = r.nat() else return null; let ?reason = r.text() else return null; ?#cancelCorporateAction({ action; reason }) };
       case 0x58 { let ?action = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#processCorporateAction({ action; postingDate; valueDate; period; narration }) };
@@ -1245,6 +1322,7 @@ module {
       case (#liquidity(le)) { w.byte(0x68); wLiquidityEvent(w, le) };
       case (#feed(fe)) { w.byte(0x69); wFeedEvent(w, fe) };
       case (#market(me)) { w.byte(0x6A); wMarketEvent(w, me) };
+      case (#curve(ce)) { w.byte(0x6B); wCurveEvent(w, ce) };
     }
   };
 
@@ -1299,6 +1377,7 @@ module {
       case 0x68 { let ?le = rLiquidityEvent(r) else return null; ?#liquidity(le) };
       case 0x69 { let ?fe = rFeedEvent(r) else return null; ?#feed(fe) };
       case 0x6A { let ?me = rMarketEvent(r) else return null; ?#market(me) };
+      case 0x6B { let ?ce = rCurveEvent(r) else return null; ?#curve(ce) };
       case _ null;
     };
     switch (out) {

@@ -73,6 +73,8 @@ import LiquidityCore "LiquidityCore";
 import FeT "FeedTypes";
 import FeedCore "FeedCore";
 import MkT "MarketTypes";
+import CvT "CurveTypes";
+import CurveCore "CurveCore";
 import MarketCore "MarketCore";
 import DayCount "mo:manticore/DayCount";
 import Xml "mo:manticore/Xml";
@@ -109,6 +111,7 @@ module {
     liquidity : LiquidityCore.State;
     feed : FeedCore.State;
     market : MarketCore.State;
+    curves : CurveCore.State;
   };
 
   public func newState(installer : Principal) : State { newStateIn(installer, RI.newArena()) };
@@ -134,6 +137,7 @@ module {
       liquidity = LiquidityCore.newState(arena);
       feed = FeedCore.newState(arena);
       market = MarketCore.newState(arena);
+      curves = CurveCore.newState(arena);
     }
   };
 
@@ -2058,6 +2062,26 @@ module {
         }
       };
       case (#liftHalt(x)) { switch (FeedCore.planLift(s.feed, x.isin, today)) { case (#err(e)) feedErr(e); case (#ok(ev)) only(#feed(ev)) } };
+      // ── curve construction ──
+      case (#buildCurve(x)) {
+        if (JCore.currencyMinorUnits(js, x.spec.currency) == null) return curveErr(#InvalidSpec({ reason = "currency " # x.spec.currency # " is not registered in the journal" }));
+        switch (CurveCore.planBuild(s.curves, x.spec, today)) {
+          case (#err(e)) curveErr(e);
+          case (#ok(ev)) {
+            // the build is the treasury domain's zero curve of the day under the same id, sourced to the
+            // specification's canonical bytes, so every mark that names the curve reads the build's factors
+            let #curveBuilt(b) = ev else Runtime.trap("a build plans a build");
+            let points = CurveCore.derivedZeroPoints({ day = b.day; dayCount = x.spec.dayCount; interpolation = x.spec.interpolation; nodes = b.nodes });
+            let w = JC.Writer(); Can.wCurveSpec(w, x.spec);
+            switch (TreasuryCore.planPublishCurve(s.treasury, { id = x.spec.id; kind = #zeroRates; currency = x.spec.currency; day = today; points; source = Sha256.fromBlob(#sha256, w.toBlob()) })) {
+              case (#err(e)) treasuryErr(e);
+              case (#ok(null)) only(#curve(ev));
+              case (#ok(?te)) #ok({ event = ?#curve(ev); extra = [#treasury(te)]; journal = [] });
+            }
+          };
+        }
+      };
+      case (#setIndexCurves(x)) { switch (CurveCore.planSetIndexCurves(s.curves, x.index, x.projection, x.discount, today)) { case (#err(e)) curveErr(e); case (#ok(ev)) only(#curve(ev)) } };
       // ── the market ──
       case (#declareMarket(x)) {
         let ?_ = TreasuryCore.security(s.treasury, x.market.isin) else return treasuryErr(#UnknownSecurity({ isin = x.market.isin }));
@@ -2412,6 +2436,18 @@ module {
           // the theta first, from the previous day's data at the day against the mark as it stands, then the mark
           switch (Valuation.markWith(s.treasury, r, kind, day, dataOn(s, day - 1))) {
             case (#ok(?withPrevious)) { let standing = if (r.kind == 4) r.fvPosted else r.markPosted; record(acc, #valuation(#thetaRecorded({ deal = r.id; day; theta = withPrevious - standing }))) };
+            case (_) {};
+          };
+          // a swap whose index reads built curves is marked on them too: the multi-curve figure beside the posted mark
+          switch (kind) {
+            case (#irs(i)) {
+              if (day < i.maturity and CurveCore.index(s.curves, i.floatingIndex) != null) {
+                switch (CurveCore.swapMark(s.curves, i, day, func(start : Nat) : ?Nat { Fixings.fixingOn(s.fixings, i.floatingIndex, start) })) {
+                  case (#ok((dc, pc, v))) record(acc, #curve(#swapMarked({ deal = r.id; day; discount = dc; projection = pc; value = v })));
+                  case (#err(e)) fail(acc, index, item.job, book, r.id, debug_show e);
+                }
+              };
+            };
             case (_) {};
           };
           switch (TreasuryCore.planMark(s.treasury, r, kind, day, ctx)) { case (#ok(?a)) ignore post("treasury-mark", r.id, "m", a, "valuation at day " # Nat.toText(day)); case (#ok(null)) {}; case (#err(e)) fail(acc, index, item.job, book, r.id, debug_show e) };
@@ -2790,6 +2826,7 @@ module {
       case (#reconciliation(re)) ReconciliationCore.fold(s.reconciliation, block.index, re);
       case (#liquidity(le)) LiquidityCore.fold(s.liquidity, block.index, le);
       case (#feed(fe)) FeedCore.fold(s.feed, block.index, fe);
+      case (#curve(ce)) CurveCore.fold(s.curves, block.index, ce);
       case (#market(me)) MarketCore.fold(s.market, block.index, me);
       case (#limits(le)) {
         LimitCore.fold(s.limits, block.index, le);
@@ -2888,7 +2925,7 @@ module {
   /// The sections of the state, each fingerprinted on its own so a divergence between the live state and a fresh
   /// fold names the sub-state, and so a state too large to digest whole in one message is compared a section at
   /// a time.
-  public func sectionNames() : [Text] { ["authority", "close", "fixings", "alerts", "eod", "treasury", "calls", "custody", "settlement", "financing", "hedges", "attribution", "collateral", "limits", "reconciliation", "liquidity", "feed", "market"] };
+  public func sectionNames() : [Text] { ["authority", "close", "fixings", "alerts", "eod", "treasury", "calls", "custody", "settlement", "financing", "hedges", "attribution", "collateral", "limits", "reconciliation", "liquidity", "feed", "market", "curves"] };
   public func fingerprintSection(s : State, name : Text) : ?Blob {
     let w = JC.Writer();
     switch (name) {
@@ -2910,6 +2947,7 @@ module {
       case "liquidity" LiquidityCore.fingerprintInto(w, s.liquidity);
       case "feed" FeedCore.fingerprintInto(w, s.feed);
       case "market" MarketCore.fingerprintInto(w, s.market);
+      case "curves" CurveCore.fingerprintInto(w, s.curves);
       case (_) return null;
     };
     ?KC.hashWithDomainBlob("THEBES-DESK-STATE-v1", w.toBlob())
@@ -2937,6 +2975,7 @@ module {
       ("reconciliation.notifications", s.reconciliation.notifications), ("reconciliation.notified", s.reconciliation.notified), ("reconciliation.statements", s.reconciliation.statements), ("reconciliation.depotBreaks", s.reconciliation.depotBreaks), ("reconciliation.cash", s.reconciliation.cash), ("reconciliation.cashBreaks", s.reconciliation.cashBreaks),
       ("liquidity.instruments", s.liquidity.instruments), ("liquidity.counterparties", s.liquidity.counterparties),
       ("feed.feeds", s.feed.feeds), ("feed.sources", s.feed.sources),
+      ("curves.specs", s.curves.specs), ("curves.builds", s.curves.builds), ("curves.nodes", s.curves.nodes), ("curves.latest", s.curves.latest), ("curves.indexes", s.curves.indexes), ("curves.marks", s.curves.marks),
       ("market.markets", s.market.markets), ("market.participants", s.market.participants), ("market.orders", s.market.orders), ("market.ordersByIsin", s.market.ordersByIsin), ("market.ordersByCycle", s.market.ordersByCycle),
       ("market.cycles", s.market.cycles), ("market.cyclesByIsin", s.market.cyclesByIsin), ("market.fills", s.market.fills), ("market.fillByInstruction", s.market.fillByInstruction),
     ]
@@ -2960,6 +2999,7 @@ module {
       ("reconciliation", debug_show ((ReconciliationCore.status(s.reconciliation), ReconciliationCore.policy(s.reconciliation)))),
       ("liquidity", debug_show ((LiquidityCore.status(s.liquidity), LiquidityCore.factors(s.liquidity)))),
       ("feed", debug_show (FeedCore.status(s.feed))), ("market", debug_show (MarketCore.status(s.market))),
+      ("curves", debug_show (CurveCore.status(s.curves))),
     ]
   };
 
@@ -2967,6 +3007,7 @@ module {
 
   func liquidityErr<X>(e : LQ.Error) : Res<X> { #err(#LiquidityError({ error = e })) };
   func feedErr<X>(e : FeT.Error) : Res<X> { #err(#FeedError({ error = e })) };
+  func curveErr<X>(e : CvT.Error) : Res<X> { #err(#CurveError({ error = e })) };
   func marketErr<X>(e : MkT.Error) : Res<X> { #err(#MarketError({ error = e })) };
   /// What an order commits, in the market's currency: the units at the reference the cycle would take, or the
   /// last accepted price, or nothing yet when the feed has none.

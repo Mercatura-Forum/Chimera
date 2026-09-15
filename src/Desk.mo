@@ -82,6 +82,8 @@ import LiquidityCore "LiquidityCore";
 import FeT "FeedTypes";
 import FeedCore "FeedCore";
 import MkT "MarketTypes";
+import CvT "CurveTypes";
+import CurveCore "CurveCore";
 import MarketCore "MarketCore";
 import MarketMessages "MarketMessages";
 import IC "mo:core/InternetComputer";
@@ -1356,6 +1358,22 @@ shared (initMsg) persistent actor class Desk(init : {
 
   // ─── the feed and the market reads ───
   public query func feedOf(isin : Text) : async ?FeT.FeedView { switch (FeedCore.feed(desk.feed, isin)) { case (?f) ?FeedCore.view(f); case null null } };
+
+  // ─── curve construction: the reads ───
+  /// A built curve as it stands on a day: the build of the day, else the latest before it.
+  public query func curveOn(id : Text, day : Nat) : async ?CvT.CurveView { switch (CurveCore.spec(desk.curves, id)) { case (?sp) CurveCore.specView(desk.curves, sp, day); case null null } };
+  public query func curveDiscount(id : Text, day : Nat, days : Nat) : async ?{ numerator : Int; denominator : Nat } {
+    switch (CurveCore.curveOf(desk.curves, id, day)) { case (#ok(c)) { switch (CurveCore.discountAt(c, days)) { case (#ok(q)) ?{ numerator = q.n; denominator = q.d }; case (#err(_)) null } }; case (#err(_)) null }
+  };
+  public query func curveForwardBps(id : Text, day : Nat, days0 : Nat, days1 : Nat) : async ?{ numerator : Int; denominator : Nat } {
+    switch (CurveCore.curveOf(desk.curves, id, day)) { case (#ok(c)) { switch (CurveCore.forwardBps(c, days0, days1)) { case (#ok(q)) ?{ numerator = q.n; denominator = q.d }; case (#err(_)) null } }; case (#err(_)) null }
+  };
+  /// The treasury domain's zero points derived from a built curve: at every node the simple rate on the treasury's
+  /// convention that reproduces the node's factor, in whole basis points; the points the build published under its id.
+  public query func curveZeroPoints(id : Text, day : Nat) : async ?[(Nat, Int)] { switch (CurveCore.curveOf(desk.curves, id, day)) { case (#ok(c)) ?CurveCore.derivedZeroPoints(c); case (#err(_)) null } };
+  public query func indexCurves(index : Text) : async ?CvT.IndexView { switch (CurveCore.index(desk.curves, index)) { case (?r) ?CurveCore.indexView(r); case null null } };
+  public query func swapMarkOn(deal : Nat, day : Nat) : async ?{ deal : Nat; day : Nat; discount : Text; projection : Text; value : Int } { switch (CurveCore.mark(desk.curves, deal, day)) { case (?m) ?{ deal = m.deal; day = m.day; discount = m.discount; projection = m.projection; value = m.value }; case null null } };
+  public query func curveStatus() : async CvT.Status { CurveCore.status(desk.curves) };
   public query func feeds() : async [FeT.FeedView] { Array.map<FeedCore.FeedRow, FeT.FeedView>(FeedCore.feeds(desk.feed), FeedCore.view) };
   public query func feedSources(isin : Text) : async [FeT.SourceView] { Array.map<FeedCore.SourceRow, FeT.SourceView>(FeedCore.sourcesOf(desk.feed, isin), FeedCore.sourceView) };
   public query func feedStatus() : async FeT.Status { FeedCore.status(desk.feed) };

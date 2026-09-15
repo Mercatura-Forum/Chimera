@@ -150,6 +150,9 @@ module {
       p("market.order.stage", "market", #create, #command("stageOrder"), false, false),
       p("market.order.cancel", "market", #update, #command("cancelOrder"), false, false),
       p("market.cycle.open", "market", #create, #command("openMarketCycle"), false, true),
+      // ── curve construction ──
+      p("curve.build", "curve", #create, #command("buildCurve"), false, true),
+      p("curve.index.update", "curve", #update, #command("setIndexCurves"), false, true),
       // ── treasury (Manticore's rows, verbatim) ──
       p("treasury.policy", "treasury", #update, #command("setTreasuryPolicy"), false, true),
       p("treasury.security.register", "treasury", #create, #command("registerSecurity"), false, true),
@@ -269,6 +272,8 @@ module {
       case (#stageOrder(_)) "stageOrder";
       case (#cancelOrder(_)) "cancelOrder";
       case (#openMarketCycle(_)) "openMarketCycle";
+      case (#buildCurve(_)) "buildCurve";
+      case (#setIndexCurves(_)) "setIndexCurves";
       case (#setTreasuryPolicy(_)) "setTreasuryPolicy";
       case (#registerSecurity(_)) "registerSecurity";
       case (#publishCurve(_)) "publishCurve";
@@ -303,7 +308,7 @@ module {
       "setLimitNode", "removeLimitNode", "amendCounterparty", "openRiskSweep",
       "setReconciliationPolicy", "recordNostroNotification", "recordDepotStatement", "resolveDepotBreak", "resolveCashBreak",
       "setLiquidityFactors", "classifyInstrument", "classifyCounterparty", "declareCapital",
-      "declareFeed", "submitPrice", "liftHalt", "declareMarket", "stageOrder", "cancelOrder", "openMarketCycle",
+      "declareFeed", "submitPrice", "liftHalt", "declareMarket", "stageOrder", "cancelOrder", "openMarketCycle", "buildCurve", "setIndexCurves",
       "setTreasuryPolicy", "registerSecurity", "publishCurve", "setTreasuryLimit", "registerNostro", "captureDeal", "confirmDeal", "amendDeal", "cancelDeal",
       "settleDealLeg", "markDeal", "recordNostroStatement", "resolveNostroBreak",
     ]

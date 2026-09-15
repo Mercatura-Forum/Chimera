@@ -471,6 +471,57 @@ class Reader(V.Reader):
     def order_terms(self):
         return {"book": self.text(), "isin": self.text(), "side": self.ORDER_SIDES[self.byte()], "units": self.nat(), "classification": self.ACCOUNTING[self.byte()], "cash": self.cash(), "reference": self.text()}
 
+    # ── curves ──
+    def instrument(self):
+        k = self.byte()
+        if k == 1:
+            return {"deposit": {"days": self.nat()}}
+        if k == 2:
+            return {"fra": {"startDays": self.nat(), "endDays": self.nat()}}
+        if k == 3:
+            return {"future": {"startDays": self.nat(), "endDays": self.nat(), "convexityBps": self.int_()}}
+        if k == 4:
+            return {"swap": {"months": self.nat(), "fixedMonths": self.nat(), "floatMonths": self.nat()}}
+        if k == 5:
+            return {"ois": {"months": self.nat(), "fixedMonths": self.nat()}}
+        if k == 6:
+            return {"basis": {"months": self.nat(), "reference": self.text(), "spreadOnReference": self.bool()}}
+        if k == 7:
+            return {"fxSwap": {"days": self.nat(), "spotMicro": self.nat()}}
+        raise ValueError(f"unknown instrument {k}")
+
+    def curve_spec(self):
+        s = {"id": self.text(), "currency": self.text()}
+        r = self.byte()
+        if r == 1:
+            s["role"] = {"discount": None}
+        elif r == 2:
+            s["role"] = {"projection": {"indexMonths": self.nat()}}
+        elif r == 3:
+            s["role"] = {"collateralDiscount": {"collateral": self.text()}}
+        else:
+            raise ValueError(f"unknown curve role {r}")
+        s["dayCount"] = self.p_convention()
+        s["interpolation"] = {1: "logLinearDiscount", 2: "linearZero"}[self.byte()]
+        s["discountCurve"] = self.opt_text()
+        n = self.len16()
+        s["quotes"] = [{"instrument": self.instrument(), "value": self.int_(), "source": self.blob()} for _ in range(n)]
+        return s
+
+    def nodes(self):
+        n = self.len16()
+        return [{"days": self.nat(), "df": self.nat()} for _ in range(n)]
+
+    def curve_event(self):
+        t = self.byte()
+        if t == 0x01:
+            return {"curveBuilt": {"spec": self.curve_spec(), "day": self.nat(), "nodes": self.nodes(), "iterations": self.nat()}}
+        if t == 0x02:
+            return {"indexCurvesSet": {"index": self.text(), "projection": self.text(), "discount": self.text(), "day": self.nat()}}
+        if t == 0x03:
+            return {"swapMarked": {"deal": self.nat(), "day": self.nat(), "discount": self.text(), "projection": self.text(), "value": self.int_()}}
+        raise ValueError(f"unknown curve event tag {t:#x}")
+
     def market_event(self):
         t = self.byte()
         if t == 0x01:
@@ -681,6 +732,10 @@ class Reader(V.Reader):
             return {"setDepotAccount": {"depot": self.text(), "account": self.t_opt_principal()}}
         if tag == 0x5A:
             return {"instructDepotTransfer": {"lot": self.nat(), "from": self.text(), "to": self.text(), "nominal": self.nat(), "deliveryId": self.opt_nat(), "reference": self.text()}}
+        if tag == 0x5B:
+            return {"buildCurve": {"spec": self.curve_spec()}}
+        if tag == 0x5C:
+            return {"setIndexCurves": {"index": self.text(), "projection": self.text(), "discount": self.text()}}
         if tag == 0x56:
             return {"announceCorporateAction": {"announcement": self.announcement()}}
         if tag == 0x57:
@@ -912,6 +967,8 @@ class Reader(V.Reader):
             return {"feed": self.feed_event()}
         if t == 0x6A:
             return {"market": self.market_event()}
+        if t == 0x6B:
+            return {"curve": self.curve_event()}
         raise ValueError(f"unknown desk event tag {t:#x}")
 
     # ── lifted without change from Manticore's verify_bank.py at 9c0c30e ──

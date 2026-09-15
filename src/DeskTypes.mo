@@ -34,6 +34,7 @@ import RT "ReconciliationTypes";
 import LQ "LiquidityTypes";
 import FeT "FeedTypes";
 import MkT "MarketTypes";
+import CvT "CurveTypes";
 
 module {
 
@@ -191,6 +192,9 @@ module {
     #stageOrder : { terms : MkT.OrderTerms; approver : ?Principal };
     #cancelOrder : { order : MkT.OrderId; reason : Text };
     #openMarketCycle : { isin : Text; approver : ?Principal };
+    // ── curve construction: a curve built from its instruments, the curves an index reads ──
+    #buildCurve : { spec : CvT.Spec };
+    #setIndexCurves : { index : Text; projection : CvT.CurveId; discount : CvT.CurveId };
     // ── treasury: the thirteen commands of Manticore's treasury domain, their bodies Manticore's ──
     #setTreasuryPolicy : TT.Policy;
     #registerSecurity : { terms : TT.SecurityTerms };
@@ -266,6 +270,7 @@ module {
     #liquidity : LQ.Event;
     #feed : FeT.Event;
     #market : MkT.Event;
+    #curve : CvT.Event;
   };
 
   public type BatchError = {
@@ -347,6 +352,7 @@ module {
     #LiquidityError : { error : LQ.Error };
     #FeedError : { error : FeT.Error };
     #MarketError : { error : MkT.Error };
+    #CurveError : { error : CvT.Error };
     #MissingRate : { currency : Text; asOf : Day };
   };
 
@@ -450,6 +456,7 @@ module {
       case (#liquidity(_)) "liquidity";
       case (#feed(_)) "feed";
       case (#market(_)) "market";
+      case (#curve(_)) "curve";
     }
   };
 }
