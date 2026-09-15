@@ -1,2 +1,2 @@
-vendor/tachyon e54e167ea0243027a5d9c7c51bdf41151c22a409
+vendor/tachyon 4e11f0452c6ba732d6e467a20949dbe8a9cf6eb5
 vendor/manticore 797c777

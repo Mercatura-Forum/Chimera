@@ -131,6 +131,12 @@ class Reader(V.Reader):
         if t in (0x12, 0x13):
             name = {0x12: "collateralReceived", 0x13: "collateralReturned"}[t]
             return {name: {"isin": self.text(), "depot": self.text(), "nominal": self.nat(), "reference": self.text(), "day": self.nat()}}
+        if t == 0x14:
+            return {"depotAccountSet": {"depot": self.text(), "account": self.t_opt_principal(), "day": self.nat()}}
+        if t == 0x15:
+            return {"transferInstructed": {"lot": self.nat(), "from": self.text(), "to": self.text(), "nominal": self.nat(), "reference": self.text(), "instruction": self.nat(), "day": self.nat()}}
+        if t == 0x16:
+            return {"transferSettled": {"instruction": self.nat(), "day": self.nat()}}
         raise ValueError(f"unknown custody event tag {t:#x}")
 
     def venue(self):
@@ -150,12 +156,12 @@ class Reader(V.Reader):
     def cycle(self):
         return {"businessDate": self.nat(), "market": self.text(), "priceSource": self.text()}
 
-    FAMILIES = {0: "treasury", 1: "repo", 2: "loan", 3: "collateral"}
+    FAMILIES = {0: "treasury", 1: "repo", 2: "loan", 3: "collateral", 4: "custody"}
 
     def instruction(self):
         return {"family": self.FAMILIES[self.byte()], "deal": self.nat(), "leg": self.nat(), "cycle": self.nat(), "role": {1: "maker", 2: "taker"}[self.byte()], "counterparty": self.principal(),
                 "assetLedger": self.principal(), "assetAmount": self.nat(), "cashLedger": self.principal(), "cashAmount": self.nat(),
-                "tradeId": self.opt_nat(), "reference": self.text(), "documentHash": self.blob(), "matched": self.bool()}
+                "tradeId": self.opt_nat(), "reference": self.text(), "documentHash": self.blob(), "matched": self.bool(), "delivery": self.bool()}
 
     def blobs(self):
         return [self.blob() for _ in range(self.nats_len())]
@@ -207,6 +213,10 @@ class Reader(V.Reader):
             return {"split": {"deal": self.nat(), "parts": self.nats(), "day": self.nat()}}
         if t == 0x15:
             return {"tradeAssigned": {"instruction": self.nat(), "tradeId": self.nat(), "day": self.nat()}}
+        if t == 0x16:
+            return {"deliveryOpened": {"instruction": self.nat(), "deliveryId": self.nat(), "escrowed": self.bool(), "note": self.text(), "day": self.nat()}}
+        if t == 0x17:
+            return {"deliveryAccepted": {"instruction": self.nat(), "deliveryId": self.nat(), "delivered": self.bool(), "note": self.text(), "day": self.nat()}}
         raise ValueError(f"unknown settlement event tag {t:#x}")
 
     FIN_ACCOUNTS = ["repoPayable", "reverseRepoReceivable", "repoInterestPayable", "repoInterestReceivable", "repoInterestExpense", "repoInterestIncome", "marginCashGiven", "marginCashReceived",
@@ -293,6 +303,8 @@ class Reader(V.Reader):
         a.update({"cashRateBps": self.nat(), "dayCount": self.p_convention(), "cash": self.cash(), "graceDays": self.nat()})
         return a
 
+    DELIVERY_MOVES = {1: "pledge", 2: "release", 3: "receive", 4: "return"}
+
     def collateral_event(self):
         t = self.byte()
         if t == 0x01:
@@ -325,6 +337,10 @@ class Reader(V.Reader):
             return {"callMet": {"agreement": self.text(), "call": self.nat(), "day": self.nat()}}
         if t == 0x0F:
             return {"callSuperseded": {"agreement": self.text(), "call": self.nat(), "outstanding": self.nat(), "day": self.nat()}}
+        if t == 0x10:
+            return {"deliveryInstructed": {"agreement": self.text(), "id": self.nat(), "move": self.DELIVERY_MOVES[self.byte()], "lot": self.opt_nat(), "isin": self.text(), "depot": self.text(), "nominal": self.nat(), "instruction": self.nat(), "day": self.nat()}}
+        if t == 0x11:
+            return {"deliverySettled": {"agreement": self.text(), "id": self.nat(), "move": self.DELIVERY_MOVES[self.byte()], "callCredit": self.nat(), "day": self.nat()}}
         raise ValueError(f"unknown collateral event tag {t:#x}")
 
     def node_kind(self):
@@ -661,6 +677,10 @@ class Reader(V.Reader):
             return {"assignDealDepot": {"deal": self.nat(), "depot": self.text()}}
         if tag == 0x55:
             return {"transferDepot": {"lot": self.nat(), "from": self.text(), "to": self.text(), "nominal": self.nat(), "reference": self.text()}}
+        if tag == 0x59:
+            return {"setDepotAccount": {"depot": self.text(), "account": self.t_opt_principal()}}
+        if tag == 0x5A:
+            return {"instructDepotTransfer": {"lot": self.nat(), "from": self.text(), "to": self.text(), "nominal": self.nat(), "deliveryId": self.opt_nat(), "reference": self.text()}}
         if tag == 0x56:
             return {"announceCorporateAction": {"announcement": self.announcement()}}
         if tag == 0x57:
@@ -777,6 +797,20 @@ class Reader(V.Reader):
             return {"cancelOrder": {"order": self.nat(), "reason": self.text()}}
         if tag == 0xD6:
             return {"openMarketCycle": {"isin": self.text(), "approver": self.t_opt_principal()}}
+        if tag == 0xD7:
+            agreement = self.text()
+            k = self.byte()
+            if k == 1:
+                move = {"pledge": {"lot": self.nat(), "nominal": self.nat()}}
+            elif k == 2:
+                move = {"release": {"pledge": self.nat(), "deliveryId": self.nat()}}
+            elif k == 3:
+                move = {"receive": {"isin": self.text(), "depot": self.text(), "nominal": self.nat(), "deliveryId": self.nat()}}
+            elif k == 4:
+                move = {"return": {"receipt": self.nat()}}
+            else:
+                raise ValueError(f"unknown collateral delivery move {k}")
+            return {"instructCollateralDelivery": {"agreement": agreement, "move": move, "counterparty": self.principal(), "reference": self.text()}}
         raise ValueError(f"unknown command tag {tag:#x}")
 
     def proposed(self):

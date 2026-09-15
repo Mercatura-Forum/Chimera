@@ -1,6 +1,7 @@
 /// SettlementMessages.mo: the settlement status advice (sese.024.001.09) and the settlement confirmation
 /// (sese.025.001.09) rendered from an instruction's recorded state, and an incoming status advice parsed to the
-/// fields the desk matches against its instruction. The instruction itself is Manticore's sese.023.
+/// fields the desk matches against its instruction. The instruction of a trade is Manticore's sese.023, against
+/// payment; the instruction of a collateral movement free of payment is rendered here.
 ///
 /// Attribution: Thebes Core Team. Licence: Apache 2.0.
 
@@ -22,6 +23,38 @@ module {
   func el(indent : Nat, name : Text, body : Text) : Text { sp(indent) # "<" # name # ">" # Xml.escape(body) # "</" # name # ">\n" };
   func sp(n : Nat) : Text { var s = ""; var i = 0; while (i < n) { s #= " "; i += 1 }; s };
   func clip(t : Text, n : Nat) : Text { if (t.size() <= n) t else Text.fromArray(Array.sliceToArray<Char>(Text.toArray(t), 0, n)) };
+
+  /// The settlement terms a message carries: a trade is against payment (APMT) with the TRAD transaction type; a
+  /// collateral movement is free of payment (FREE), collateral out on the giver's side of the agreement and
+  /// collateral in on the taker's, and carries no amount.
+  public type Terms = { payment : Text; txType : Text };
+  public let tradeTerms : Terms = { payment = "APMT"; txType = "TRAD" };
+  public func collateralTerms(given : Bool) : Terms { { payment = "FREE"; txType = if (given) "COLO" else "COLI" } };
+  /// A transfer between two accounts of the desk at different holders: an own-account transfer, external.
+  public let transferTerms : Terms = { payment = "FREE"; txType = "OWNE" };
+
+  /// The instruction of a collateral movement free of payment as sese.023.001.09: the securities movement type by
+  /// the desk's side of it, no payment, no amount, the collateral transaction type by the side of the agreement.
+  public func sese023FreeXml(txId : Text, sec : TT.SecurityTerms, nominal : Nat, minorUnits : Nat8, safekeepingAccount : Text, tradeDay : Nat, settlementDay : Nat, receive : Bool, terms : Terms) : Text {
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    # "<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:sese.023.001.09\">\n"
+    # "  <SctiesSttlmTxInstr>\n"
+    # el(4, "TxId", clip(txId, 35))
+    # "    <SttlmTpAndAddtlParams>\n" # el(6, "SctiesMvmntTp", if (receive) "RECE" else "DELI") # el(6, "Pmt", terms.payment) # "    </SttlmTpAndAddtlParams>\n"
+    # "    <TradDtls>\n"
+    # sp(6) # "<TradDt><Dt><Dt>" # CivilDate.toText(tradeDay) # "</Dt></Dt></TradDt>\n"
+    # sp(6) # "<SttlmDt><Dt><Dt>" # CivilDate.toText(settlementDay) # "</Dt></Dt></SttlmDt>\n"
+    # "    </TradDtls>\n"
+    # "    <FinInstrmId>\n" # el(6, "ISIN", sec.isin) # "    </FinInstrmId>\n"
+    # "    <FinInstrmAttrbts>\n" # el(6, "DnmtnCcy", sec.currency) # el(6, "MtrtyDt", CivilDate.toText(sec.maturity)) # el(6, "IsseDt", CivilDate.toText(sec.issue)) # el(6, "IntrstRate", TreasuryMessages.decimalText(sec.couponBps, 2)) # "    </FinInstrmAttrbts>\n"
+    # "    <QtyAndAcctDtls>\n"
+    # sp(6) # "<SttlmQty><Qty><FaceAmt>" # TreasuryMessages.decimalText(nominal, minorUnits) # "</FaceAmt></Qty></SttlmQty>\n"
+    # sp(6) # "<SfkpgAcct><Id>" # Xml.escape(clip(safekeepingAccount, 35)) # "</Id></SfkpgAcct>\n"
+    # "    </QtyAndAcctDtls>\n"
+    # "    <SttlmParams>\n" # sp(6) # "<SctiesTxTp><Cd>" # terms.txType # "</Cd></SctiesTxTp>\n" # "    </SttlmParams>\n"
+    # "  </SctiesSttlmTxInstr>\n"
+    # "</Document>\n"
+  };
 
   /// The status branch an instruction's state renders as: processing acknowledged while the desk is putting the
   /// trade up, settlement pending while it waits for the counterparty's leg, failing once the cycle has passed,
@@ -52,41 +85,41 @@ module {
     }
   };
 
-  func txDetails(indent : Nat, safekeepingAccount : Text, isin : Text, nominal : Nat, currency : Text, amount : Nat, minorUnits : Nat8, settlementDay : Nat, receive : Bool) : Text {
+  func txDetails(indent : Nat, safekeepingAccount : Text, isin : Text, nominal : Nat, currency : Text, amount : Nat, minorUnits : Nat8, settlementDay : Nat, receive : Bool, terms : Terms) : Text {
     sp(indent) # "<SfkpgAcct><Id>" # Xml.escape(clip(safekeepingAccount, 35)) # "</Id></SfkpgAcct>\n"
     # sp(indent) # "<FinInstrmId><ISIN>" # Xml.escape(isin) # "</ISIN></FinInstrmId>\n"
     # sp(indent) # "<SttlmQty><Qty><FaceAmt>" # TreasuryMessages.decimalText(nominal, minorUnits) # "</FaceAmt></Qty></SttlmQty>\n"
-    # sp(indent) # "<SttlmAmt><Amt Ccy=\"" # Xml.escape(currency) # "\">" # TreasuryMessages.decimalText(amount, minorUnits) # "</Amt><CdtDbtInd>" # (if (receive) "DBIT" else "CRDT") # "</CdtDbtInd></SttlmAmt>\n"
+    # (if (terms.payment == "FREE") "" else sp(indent) # "<SttlmAmt><Amt Ccy=\"" # Xml.escape(currency) # "\">" # TreasuryMessages.decimalText(amount, minorUnits) # "</Amt><CdtDbtInd>" # (if (receive) "DBIT" else "CRDT") # "</CdtDbtInd></SttlmAmt>\n")
     # sp(indent) # "<SttlmDt><Dt><Dt>" # CivilDate.toText(settlementDay) # "</Dt></Dt></SttlmDt>\n"
-    # el(indent, "SctiesMvmntTp", if (receive) "RECE" else "DELI") # el(indent, "Pmt", "APMT")
-    # sp(indent) # "<SttlmParams><SctiesTxTp><Cd>TRAD</Cd></SctiesTxTp></SttlmParams>\n"
+    # el(indent, "SctiesMvmntTp", if (receive) "RECE" else "DELI") # el(indent, "Pmt", terms.payment)
+    # sp(indent) # "<SttlmParams><SctiesTxTp><Cd>" # terms.txType # "</Cd></SctiesTxTp></SttlmParams>\n"
   };
 
   /// The desk's status advice for an instruction: the account owner's reference, Tachyon's trade id as the market
   /// infrastructure's, the status branch, then the transaction as instructed.
-  public func sese024Xml(reference : Text, tradeId : ?Nat, status : Status, safekeepingAccount : Text, isin : Text, nominal : Nat, currency : Text, amount : Nat, minorUnits : Nat8, settlementDay : Nat, receive : Bool) : Text {
+  public func sese024Xml(reference : Text, tradeId : ?Nat, status : Status, safekeepingAccount : Text, isin : Text, nominal : Nat, currency : Text, amount : Nat, minorUnits : Nat8, settlementDay : Nat, receive : Bool, terms : Terms) : Text {
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
     # "<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:sese.024.001.09\">\n"
     # "  <SctiesSttlmTxStsAdvc>\n"
     # "    <TxId>\n" # el(6, "AcctOwnrTxId", clip(reference, 35)) # (switch (tradeId) { case (?t) el(6, "MktInfrstrctrTxId", Nat.toText(t)); case null "" }) # "    </TxId>\n"
     # statusXml(status)
-    # "    <TxDtls>\n" # txDetails(6, safekeepingAccount, isin, nominal, currency, amount, minorUnits, settlementDay, receive) # "    </TxDtls>\n"
+    # "    <TxDtls>\n" # txDetails(6, safekeepingAccount, isin, nominal, currency, amount, minorUnits, settlementDay, receive, terms) # "    </TxDtls>\n"
     # "  </SctiesSttlmTxStsAdvc>\n"
     # "</Document>\n"
   };
 
   /// The desk's confirmation of a settled instruction: the effective settlement day is the day the receipt was
   /// verified and the treasury leg settled.
-  public func sese025Xml(reference : Text, tradeId : Nat, safekeepingAccount : Text, isin : Text, nominal : Nat, currency : Text, amount : Nat, minorUnits : Nat8, settlementDay : Nat, effectiveDay : Nat, receive : Bool) : Text {
+  public func sese025Xml(reference : Text, tradeId : Nat, safekeepingAccount : Text, isin : Text, nominal : Nat, currency : Text, amount : Nat, minorUnits : Nat8, settlementDay : Nat, effectiveDay : Nat, receive : Bool, terms : Terms) : Text {
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
     # "<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:sese.025.001.09\">\n"
     # "  <SctiesSttlmTxConf>\n"
-    # "    <TxIdDtls>\n" # el(6, "AcctOwnrTxId", clip(reference, 35)) # el(6, "MktInfrstrctrTxId", Nat.toText(tradeId)) # el(6, "SctiesMvmntTp", if (receive) "RECE" else "DELI") # el(6, "Pmt", "APMT") # "    </TxIdDtls>\n"
+    # "    <TxIdDtls>\n" # el(6, "AcctOwnrTxId", clip(reference, 35)) # el(6, "MktInfrstrctrTxId", Nat.toText(tradeId)) # el(6, "SctiesMvmntTp", if (receive) "RECE" else "DELI") # el(6, "Pmt", terms.payment) # "    </TxIdDtls>\n"
     # "    <TradDtls>\n" # sp(6) # "<SttlmDt><Dt><Dt>" # CivilDate.toText(settlementDay) # "</Dt></Dt></SttlmDt>\n" # sp(6) # "<FctvSttlmDt><Dt><Dt>" # CivilDate.toText(effectiveDay) # "</Dt></Dt></FctvSttlmDt>\n" # "    </TradDtls>\n"
     # "    <FinInstrmId>" # "<ISIN>" # Xml.escape(isin) # "</ISIN></FinInstrmId>\n"
     # "    <QtyAndAcctDtls>\n" # sp(6) # "<SttldQty><Qty><FaceAmt>" # TreasuryMessages.decimalText(nominal, minorUnits) # "</FaceAmt></Qty></SttldQty>\n" # sp(6) # "<SfkpgAcct><Id>" # Xml.escape(clip(safekeepingAccount, 35)) # "</Id></SfkpgAcct>\n" # "    </QtyAndAcctDtls>\n"
-    # "    <SttlmParams><SctiesTxTp><Cd>TRAD</Cd></SctiesTxTp></SttlmParams>\n"
-    # "    <SttldAmt><Amt Ccy=\"" # Xml.escape(currency) # "\">" # TreasuryMessages.decimalText(amount, minorUnits) # "</Amt><CdtDbtInd>" # (if (receive) "DBIT" else "CRDT") # "</CdtDbtInd></SttldAmt>\n"
+    # "    <SttlmParams><SctiesTxTp><Cd>" # terms.txType # "</Cd></SctiesTxTp></SttlmParams>\n"
+    # (if (terms.payment == "FREE") "" else "    <SttldAmt><Amt Ccy=\"" # Xml.escape(currency) # "\">" # TreasuryMessages.decimalText(amount, minorUnits) # "</Amt><CdtDbtInd>" # (if (receive) "DBIT" else "CRDT") # "</CdtDbtInd></SttldAmt>\n")
     # "  </SctiesSttlmTxConf>\n"
     # "</Document>\n"
   };

@@ -759,6 +759,12 @@ shared (initMsg) persistent actor class Desk(init : {
     reclaim : (Nat) -> async Result.Result<DT.ReclaimResult, Text>;
     settle : (Nat) -> async Result.Result<DT.SettleResult, Text>;
     getTrade : shared query (Nat) -> async ?DT.TradeView;
+    openDelivery : ({ taker : Principal; ledger : Principal; amount : Nat; deadlineSecs : Nat }) -> async Result.Result<DT.OpenDeliveryResult, Text>;
+    fundDelivery : (Nat) -> async Result.Result<DT.DeliveryResult, Text>;
+    acceptDelivery : (Nat) -> async Result.Result<DT.DeliveryResult, Text>;
+    settleDelivery : (Nat) -> async Result.Result<DT.DeliveryResult, Text>;
+    reclaimDelivery : (Nat) -> async Result.Result<DT.DeliveryResult, Text>;
+    getDelivery : shared query (Nat) -> async ?DT.DeliveryView;
     allEvents : shared query () -> async [DT.AuditEvent];
     auditRoot : shared query () -> async ?Blob;
     tradeIdForMatch : shared query (Principal, Nat) -> async ?Nat;
@@ -810,32 +816,12 @@ shared (initMsg) persistent actor class Desk(init : {
   };
   /// A trade read back as settled, aborted, or still open: the settlement from the verified receipt, the reclaim
   /// of the desk's escrow and the trade reset, or a wait.
-  func observeTrade(core : Core_, venue : ST.Venue, i0 : SettlementCore.InstructionRow, tradeId : Nat, today : Nat) : async* Result.Result<ST.Step, T.Error> {
+  func observeTrade(core : Core_, i0 : SettlementCore.InstructionRow, tradeId : Nat, today : Nat) : async* Result.Result<ST.Step, T.Error> {
     let t = try { await core.getTrade(tradeId) } catch (_e) { return refusedCall(i0, "getTrade", "Tachyon did not answer", today) };
     let ?i = stillThere(i0.id, i0.lastBlock) else return settlementErr(#Waiting({ instruction = i0.id; state = "moved during the call"; tradeStatus = "" }));
     let ?v = t else return refusedCall(i, "getTrade", "no such trade " # Nat.toText(tradeId), today);
     switch (v.status) {
-      case (#Settled) {
-        // the receipt: Tachyon's enumeration mirrored to its root, then the trade's settlement event found in the mirror
-        let events = try { await core.allEvents() } catch (_e) { return refusedCall(i, "allEvents", "Tachyon did not answer", today) };
-        let root = try { await core.auditRoot() } catch (_e) { return refusedCall(i, "auditRoot", "Tachyon did not answer", today) };
-        let ?i2 = stillThere(i.id, i.lastBlock) else return settlementErr(#Waiting({ instruction = i.id; state = "moved during the call"; tradeStatus = "Settled" }));
-        switch (SettlementCore.checkEnumeration(desk.settlement, events, root)) {
-          case (#err(reason)) return refusedCall(i2, "auditSync", reason, today);
-          case (#ok(sync)) { if (sync.leaves.size() > 0 or SettlementCore.mirrorRoot(desk.settlement) != ?sync.root) ignore commitDesk(me(), #settlement(#auditSynced({ from = sync.from; leaves = sync.leaves; root = sync.root; day = today })), null) };
-        };
-        let receipt = switch (SettlementCore.findReceipt(desk.settlement, tradeId, events)) { case (#err(reason)) return refusedCall(i2, "receipt", reason, today); case (#ok(r)) r };
-        let i3 = { i2 with tradeId };
-        switch (Core.planReceiptSettlement(desk, deskBlocks(), journal, me(), now(), i3, receipt, today)) {
-          case (#err(e)) { ignore commitDesk(me(), #settlement(#callRefused({ instruction = i3.id; step = "settle"; reason = debug_show e; day = today })), null); #err(e) };
-          case (#ok(plan)) {
-            switch (plan.event) { case (?ev) ignore commitDesk(me(), ev, null); case null {} };
-            for (ev in plan.extra.vals()) ignore commitDesk(me(), ev, null);
-            for (step in plan.journal.vals()) { switch (step) { case (#event(ev)) ignore commitJournal(ev); case (#existing(_)) {} } };
-            #ok(stepOf(i3, "settled"))
-          };
-        }
-      };
+      case (#Settled) await* settleFromMirror(core, i, tradeId, today, "Settled");
       case (#Funded) {
         // both legs in escrow: the trade settles; the desk drives the payouts and observes the receipt next
         let r = try { await core.settle(tradeId) } catch (_e) { return refusedCall(i, "settle", "Tachyon did not answer", today) };
@@ -873,6 +859,75 @@ shared (initMsg) persistent actor class Desk(init : {
     };
     // no call stands between the reclaim recorded above and the reset: both land in this message
     ignore commitDesk(me(), #settlement(#tradeReset({ instruction = i.id; previous = tradeId; day = today })), null);
+    #ok(stepOf(i, "reset after " # why))
+  };
+  /// A delivery read back as delivered, reclaimed, or still standing: the settlement from the verified receipt, the
+  /// reclaim of the desk's escrow and the instruction reset, or a wait. The receipt of a delivery is found in the
+  /// same mirror as a trade's, one leg short.
+  func observeDelivery(core : Core_, i0 : SettlementCore.InstructionRow, deliveryId : Nat, today : Nat) : async* Result.Result<ST.Step, T.Error> {
+    let d = try { await core.getDelivery(deliveryId) } catch (_e) { return refusedCall(i0, "getDelivery", "Tachyon did not answer", today) };
+    let ?i = stillThere(i0.id, i0.lastBlock) else return settlementErr(#Waiting({ instruction = i0.id; state = "moved during the call"; tradeStatus = "" }));
+    let ?v = d else return refusedCall(i, "getDelivery", "no such delivery " # Nat.toText(deliveryId), today);
+    switch (v.status) {
+      case (#Delivered) await* settleFromMirror(core, i, deliveryId, today, "Delivered");
+      case (#Escrowed) {
+        if (v.accepted) {
+          // accepted and not yet paid out: the payout is re-driven, the receipt observed next
+          let r = try { await core.settleDelivery(deliveryId) } catch (_e) { return refusedCall(i, "settleDelivery", "Tachyon did not answer", today) };
+          let ?i2 = stillThere(i.id, i.lastBlock) else return settlementErr(#Waiting({ instruction = i.id; state = "moved during the call"; tradeStatus = "Escrowed" }));
+          switch (r) { case (#err(reason)) refusedCall(i2, "settleDelivery", reason, today); case (#ok(res)) #ok({ step = "payout driven: " # res.note; state = ST.stateText(i2.state); tradeId = ?deliveryId }) }
+        } else if (now() > v.deadline) await* resetDeliveryAfter(core, i, deliveryId, today, "Escrowed past its deadline")
+        else settlementErr(#Waiting({ instruction = i.id; state = ST.stateText(i.state); tradeStatus = "Escrowed" }))
+      };
+      case (#Reclaimed) await* resetDeliveryAfter(core, i, deliveryId, today, "Reclaimed");
+      case (#Open) {
+        if (now() > v.deadline) await* resetDeliveryAfter(core, i, deliveryId, today, "Open past its deadline")
+        else settlementErr(#Waiting({ instruction = i.id; state = ST.stateText(i.state); tradeStatus = "Open" }))
+      };
+    }
+  };
+  /// The settlement of an instruction from the venue's own record: Tachyon's enumeration mirrored to its root, the
+  /// trade's or the delivery's event found in the mirror, the plan of the settlement recorded.
+  func settleFromMirror(core : Core_, i : SettlementCore.InstructionRow, tradeId : Nat, today : Nat, status : Text) : async* Result.Result<ST.Step, T.Error> {
+    let events = try { await core.allEvents() } catch (_e) { return refusedCall(i, "allEvents", "Tachyon did not answer", today) };
+    let root = try { await core.auditRoot() } catch (_e) { return refusedCall(i, "auditRoot", "Tachyon did not answer", today) };
+    let ?i2 = stillThere(i.id, i.lastBlock) else return settlementErr(#Waiting({ instruction = i.id; state = "moved during the call"; tradeStatus = status }));
+    switch (SettlementCore.checkEnumeration(desk.settlement, events, root)) {
+      case (#err(reason)) return refusedCall(i2, "auditSync", reason, today);
+      case (#ok(sync)) { if (sync.leaves.size() > 0 or SettlementCore.mirrorRoot(desk.settlement) != ?sync.root) ignore commitDesk(me(), #settlement(#auditSynced({ from = sync.from; leaves = sync.leaves; root = sync.root; day = today })), null) };
+    };
+    let receipt = switch (SettlementCore.findReceipt(desk.settlement, tradeId, events)) { case (#err(reason)) return refusedCall(i2, "receipt", reason, today); case (#ok(r)) r };
+    let i3 = { i2 with tradeId };
+    switch (Core.planReceiptSettlement(desk, deskBlocks(), journal, me(), now(), i3, receipt, today)) {
+      case (#err(e)) { ignore commitDesk(me(), #settlement(#callRefused({ instruction = i3.id; step = "settle"; reason = debug_show e; day = today })), null); #err(e) };
+      case (#ok(plan)) {
+        switch (plan.event) { case (?ev) ignore commitDesk(me(), ev, null); case null {} };
+        for (ev in plan.extra.vals()) ignore commitDesk(me(), ev, null);
+        for (step in plan.journal.vals()) { switch (step) { case (#event(ev)) ignore commitJournal(ev); case (#existing(_)) {} } };
+        #ok(stepOf(i3, "settled"))
+      };
+    }
+  };
+  /// A delivery that will not settle: the desk reclaims the leg it escrowed (Tachyon returns it in full past the
+  /// deadline, and reports an already reclaimed one), and the instruction is reset: the desk opens a new delivery,
+  /// or awaits the counterparty's.
+  func resetDeliveryAfter(core : Core_, i : SettlementCore.InstructionRow, deliveryId : Nat, today : Nat, why : Text) : async* Result.Result<ST.Step, T.Error> {
+    if (i.escrowed or i.role == #maker) {
+      let r = try { await core.reclaimDelivery(deliveryId) } catch (_e) { return refusedCall(i, "reclaimDelivery", "Tachyon did not answer", today) };
+      let ?i2 = stillThere(i.id, i.lastBlock) else return settlementErr(#Waiting({ instruction = i.id; state = "moved during the call"; tradeStatus = why }));
+      switch (r) {
+        case (#err(reason)) return refusedCall(i2, "reclaimDelivery", reason, today);
+        case (#ok(res)) {
+          if (i2.escrowed) {
+            if (not res.reclaimed) return refusedCall(i2, "reclaimDelivery", "the desk's leg is not refunded: " # res.note, today);
+            ignore commitDesk(me(), #settlement(#reclaimed({ instruction = i2.id; tradeId = deliveryId; note = res.note; day = today })), null);
+          };
+        };
+      };
+    } else {
+      let ?_ = stillThere(i.id, i.lastBlock) else return settlementErr(#Waiting({ instruction = i.id; state = "moved during the call"; tradeStatus = why }));
+    };
+    ignore commitDesk(me(), #settlement(#tradeReset({ instruction = i.id; previous = deliveryId; day = today })), null);
     #ok(stepOf(i, "reset after " # why))
   };
   /// The next step of an instruction: what the desk has recorded it will do, done, and the reply recorded. Open by
@@ -956,8 +1011,45 @@ shared (initMsg) persistent actor class Desk(init : {
           case (#ok(res)) { ignore commitDesk(me(), #settlement(#fundingRecorded({ instruction = i2.id; tradeId = x.tradeId; escrowed = res.legEscrowed; bothEscrowed = res.bothEscrowed; note = res.settleNote; day = today })), null); #ok(stepOf(i2, "funded")) };
         }
       };
-      case (#observe(x)) await* observeTrade(core, venue, i, x.tradeId, today);
-      case (#resetTrade(x)) await* observeTrade(core, venue, i, x.previous, today);
+      case (#observe(x)) await* observeTrade(core, i, x.tradeId, today);
+      case (#resetTrade(x)) { if (i.delivery) await* observeDelivery(core, i, x.previous, today) else await* observeTrade(core, i, x.previous, today) };
+      case (#openDelivery) {
+        switch (await* approveCore(i.assetLedger, venue.core, i.assetAmount)) { case (#err(reason)) return refusedCall(i, "approve", reason, today); case (#ok(_)) {} };
+        let r = try { await core.openDelivery({ taker = i.counterparty; ledger = i.assetLedger; amount = i.assetAmount; deadlineSecs = venue.deadlineSecs }) } catch (_e) { return refusedCall(i, "openDelivery", "Tachyon did not answer", today) };
+        let ?i2 = stillThere(i.id, i.lastBlock) else return settlementErr(#Waiting({ instruction = i.id; state = "moved during the call"; tradeStatus = "" }));
+        switch (r) {
+          case (#err(reason)) refusedCall(i2, "openDelivery", reason, today);
+          case (#ok(res)) { ignore commitDesk(me(), #settlement(#deliveryOpened({ instruction = i2.id; deliveryId = res.deliveryId; escrowed = res.makerEscrowed; note = res.note; day = today })), null); #ok(stepOf(i2, "delivery opened")) };
+        }
+      };
+      case (#fundDelivery(x)) {
+        switch (await* approveCore(i.assetLedger, venue.core, i.assetAmount)) { case (#err(reason)) return refusedCall(i, "approve", reason, today); case (#ok(_)) {} };
+        let r = try { await core.fundDelivery(x.deliveryId) } catch (_e) { return refusedCall(i, "fundDelivery", "Tachyon did not answer", today) };
+        let ?i2 = stillThere(i.id, i.lastBlock) else return settlementErr(#Waiting({ instruction = i.id; state = "moved during the call"; tradeStatus = "" }));
+        switch (r) {
+          case (#err(reason)) refusedCall(i2, "fundDelivery", reason, today);
+          // one leg: the desk's escrow is the whole escrow
+          case (#ok(res)) { ignore commitDesk(me(), #settlement(#fundingRecorded({ instruction = i2.id; tradeId = x.deliveryId; escrowed = res.escrowed; bothEscrowed = res.escrowed; note = res.note; day = today })), null); #ok(stepOf(i2, "delivery funded")) };
+        }
+      };
+      case (#acceptDelivery(x)) {
+        let d = try { await core.getDelivery(x.deliveryId) } catch (_e) { return refusedCall(i, "getDelivery", "Tachyon did not answer", today) };
+        let ?i2 = stillThere(i.id, i.lastBlock) else return settlementErr(#Waiting({ instruction = i.id; state = "moved during the call"; tradeStatus = "" }));
+        let ?v = d else return refusedCall(i2, "acceptDelivery", "no such delivery " # Nat.toText(x.deliveryId), today);
+        if (v.status == #Reclaimed or (v.status != #Delivered and now() > v.deadline)) return await* resetDeliveryAfter(core, i2, x.deliveryId, today, "the counterparty's delivery expired");
+        switch (SettlementCore.checkDelivery(i2, me(), v)) {
+          case (?reason) { ignore commitDesk(me(), #settlement(#callRefused({ instruction = i2.id; step = "acceptDelivery"; reason; day = today })), null); settlementErr(#TradeMismatch({ instruction = i2.id; reason })) };
+          case null {
+            let r = try { await core.acceptDelivery(x.deliveryId) } catch (_e) { return refusedCall(i2, "acceptDelivery", "Tachyon did not answer", today) };
+            let ?i3 = stillThere(i2.id, i2.lastBlock) else return settlementErr(#Waiting({ instruction = i2.id; state = "moved during the call"; tradeStatus = "Escrowed" }));
+            switch (r) {
+              case (#err(reason)) refusedCall(i3, "acceptDelivery", reason, today);
+              case (#ok(res)) { ignore commitDesk(me(), #settlement(#deliveryAccepted({ instruction = i3.id; deliveryId = x.deliveryId; delivered = res.delivered; note = res.note; day = today })), null); #ok(stepOf(i3, "delivery accepted")) };
+            }
+          };
+        }
+      };
+      case (#observeDelivery(x)) await* observeDelivery(core, i, x.deliveryId, today);
     }
   };
 
@@ -966,7 +1058,7 @@ shared (initMsg) persistent actor class Desk(init : {
   public query func settlementLedgers() : async [ST.LedgerDeclaration] { SettlementCore.ledgers(desk.settlement) };
   public query func settlementCycle(businessDate : Nat) : async ?ST.CycleView { switch (SettlementCore.cycle(desk.settlement, businessDate)) { case (?c) ?SettlementCore.cycleView(c); case null null } };
   func instructionView(r : SettlementCore.InstructionRow) : ST.InstructionView {
-    let reference = switch (r.family) { case (#treasury) Core.treasuryCaptureOf(deskBlocks(), r.deal).1; case (#repo) Core.repoOpeningOf(deskBlocks(), r.deal).1; case (#loan) Core.loanOpeningOf(deskBlocks(), r.deal).1; case (#collateral) substitutionReference(r.deal) };
+    let reference = switch (r.family) { case (#treasury) Core.treasuryCaptureOf(deskBlocks(), r.deal).1; case (#repo) Core.repoOpeningOf(deskBlocks(), r.deal).1; case (#loan) Core.loanOpeningOf(deskBlocks(), r.deal).1; case (#collateral) substitutionReference(r.deal); case (#custody) Core.transferReferenceOf(deskBlocks(), r.id) };
     SettlementCore.view(r, reference)
   };
   public query func settlementInstruction(id : Nat) : async ?ST.InstructionView { switch (SettlementCore.instruction(desk.settlement, id)) { case (?r) ?instructionView(r); case null null } };
@@ -978,22 +1070,50 @@ shared (initMsg) persistent actor class Desk(init : {
   func instructionMessage(id : Nat, confirmation : Bool) : ?Text {
     let ?i = SettlementCore.instruction(desk.settlement, id) else return null;
     // the instrument, the reference, the trade day and the safekeeping account of the leg's subject
-    let (isin, reference, tradeDay, account) : (Text, Text, Nat, Text) = switch (i.family) {
-      case (#treasury) { let ?r = TreasuryCore.row(desk.treasury, i.deal) else return null; (r.isin, Core.treasuryCaptureOf(deskBlocks(), i.deal).1, r.start, Core.safekeepingAccountOf(desk, i.deal)) };
-      case (#repo) { let ?r = FinancingCore.repo(desk.financing, i.deal) else return null; (r.isin, Core.repoOpeningOf(deskBlocks(), i.deal).1, i.cycle, switch (CustodyCore.depot(desk.custody, r.depot)) { case (?d) d.safekeepingAccount; case null r.depot }) };
-      case (#loan) { let ?l = FinancingCore.loan(desk.financing, i.deal) else return null; (l.isin, Core.loanOpeningOf(deskBlocks(), i.deal).1, i.cycle, switch (CustodyCore.depot(desk.custody, l.depot)) { case (?d) d.safekeepingAccount; case null l.depot }) };
-      case (#collateral) { let ?r = CollateralCore.securitiesRow(desk.collateral, i.deal) else return null; (r.isin, substitutionReference(i.deal), r.day, switch (CustodyCore.depot(desk.custody, r.depot)) { case (?d) d.safekeepingAccount; case null r.depot }) };
+    let (isin, reference, tradeDay, account, terms) : (Text, Text, Nat, Text, SettlementMessages.Terms) = switch (i.family) {
+      case (#treasury) { let ?r = TreasuryCore.row(desk.treasury, i.deal) else return null; (r.isin, Core.treasuryCaptureOf(deskBlocks(), i.deal).1, r.start, Core.safekeepingAccountOf(desk, i.deal), SettlementMessages.tradeTerms) };
+      case (#repo) { let ?r = FinancingCore.repo(desk.financing, i.deal) else return null; (r.isin, Core.repoOpeningOf(deskBlocks(), i.deal).1, i.cycle, switch (CustodyCore.depot(desk.custody, r.depot)) { case (?d) d.safekeepingAccount; case null r.depot }, SettlementMessages.tradeTerms) };
+      case (#loan) { let ?l = FinancingCore.loan(desk.financing, i.deal) else return null; (l.isin, Core.loanOpeningOf(deskBlocks(), i.deal).1, i.cycle, switch (CustodyCore.depot(desk.custody, l.depot)) { case (?d) d.safekeepingAccount; case null l.depot }, SettlementMessages.tradeTerms) };
+      case (#collateral) { let ?r = CollateralCore.securitiesRow(desk.collateral, i.deal) else return null; (r.isin, substitutionReference(i.deal), r.day, switch (CustodyCore.depot(desk.custody, r.depot)) { case (?d) d.safekeepingAccount; case null r.depot }, if (i.delivery) SettlementMessages.collateralTerms(r.given) else SettlementMessages.tradeTerms) };
+      case (#custody) {
+        let ?t = CustodyCore.transfer(desk.custody, i.id) else return null;
+        let ?r = TreasuryCore.row(desk.treasury, i.deal) else return null;
+        let from = CustodyCore.depotIdOfHash(desk.custody, t.fromHash);
+        (r.isin, Core.transferReferenceOf(deskBlocks(), i.id), i.cycle, switch (CustodyCore.depot(desk.custody, from)) { case (?d) d.safekeepingAccount; case null from }, SettlementMessages.transferTerms)
+      };
     };
     let ?sec = TreasuryCore.security(desk.treasury, isin) else return null;
     let receive = i.role == #taker;
     if (confirmation) {
       if (i.state != #settled) return null;
       let effective = switch (deskBlock(i.lastBlock)) { case (?b) { switch (b.event) { case (#settlement(#settled(x))) x.day; case (_) i.cycle } }; case null i.cycle };
-      ?SettlementMessages.sese025Xml(reference, i.tradeId, account, isin, i.assetAmount, sec.currency, i.cashAmount, minorUnits(sec.currency), tradeDay, effective, receive)
+      ?SettlementMessages.sese025Xml(reference, i.tradeId, account, isin, i.assetAmount, sec.currency, i.cashAmount, minorUnits(sec.currency), tradeDay, effective, receive, terms)
     } else {
-      ?SettlementMessages.sese024Xml(reference, if (i.tradeId == 0) null else ?i.tradeId, SettlementMessages.statusOf(i.state, i.role, i.fails), account, isin, i.assetAmount, sec.currency, i.cashAmount, minorUnits(sec.currency), tradeDay, receive)
+      ?SettlementMessages.sese024Xml(reference, if (i.tradeId == 0) null else ?i.tradeId, SettlementMessages.statusOf(i.state, i.role, i.fails), account, isin, i.assetAmount, sec.currency, i.cashAmount, minorUnits(sec.currency), tradeDay, receive, terms)
     }
   };
+  /// A delivery's instruction free of payment as sese.023.001.09: a collateral movement by its row's face nominal,
+  /// collateral in or out by the agreement's side; a depot transfer by its nominal as an own-account transfer. The
+  /// movement is by the desk's side; no amount.
+  public query func deliveryInstruction(id : Nat) : async ?Text {
+    let ?i = SettlementCore.instruction(desk.settlement, id) else return null;
+    if (not i.delivery) return null;
+    let (isin, reference, nominal, depot, tradeDay, terms) : (Text, Text, Nat, Text, Nat, SettlementMessages.Terms) = switch (i.family) {
+      case (#collateral) { let ?r = CollateralCore.securitiesRow(desk.collateral, i.deal) else return null; (r.isin, substitutionReference(i.deal), r.nominal, r.depot, r.day, SettlementMessages.collateralTerms(r.given)) };
+      case (#custody) {
+        let ?t = CustodyCore.transfer(desk.custody, i.id) else return null;
+        let ?r = TreasuryCore.row(desk.treasury, i.deal) else return null;
+        (r.isin, Core.transferReferenceOf(deskBlocks(), i.id), t.nominal, CustodyCore.depotIdOfHash(desk.custody, t.fromHash), i.cycle, SettlementMessages.transferTerms)
+      };
+      case (_) return null;
+    };
+    let ?sec = TreasuryCore.security(desk.treasury, isin) else return null;
+    let secTerms : TT.SecurityTerms = { isin = sec.isin; issuer = sec.issuer; currency = sec.currency; couponBps = sec.couponBps; couponsPerYear = sec.couponsPerYear; dayCount = TreasuryCore.conventionOf(sec); issue = sec.issue; maturity = sec.maturity };
+    let account = switch (CustodyCore.depot(desk.custody, depot)) { case (?d) d.safekeepingAccount; case null depot };
+    ?SettlementMessages.sese023FreeXml(reference, secTerms, nominal, minorUnits(sec.currency), account, tradeDay, i.cycle, i.role == #taker, terms)
+  };
+  public query func depotAccount(id : Text) : async ?Principal { CustodyCore.depotAccount(desk.custody, id) };
+  public query func depotTransfer(instruction : Nat) : async ?CuT.TransferView { switch (CustodyCore.transfer(desk.custody, instruction)) { case (?t) ?CustodyCore.transferView(desk.custody, t); case null null } };
   public query func settlementStatusAdvice(id : Nat) : async ?Text { instructionMessage(id, false) };
 
   // ─── financing reads ───

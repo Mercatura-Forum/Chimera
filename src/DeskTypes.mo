@@ -59,6 +59,12 @@ module {
 
   /// Who the desk is on a confirmation: its name as the trading side, its BIC and its LEI.
   public type Identity = { name : Text; bic : Text; lei : Text };
+  public type CollateralDeliveryMove = {
+    #pledge : { lot : TT.DealId; nominal : Nat };
+    #release : { pledge : Nat; deliveryId : Nat };
+    #receive : { isin : Text; depot : Text; nominal : Nat; deliveryId : Nat };
+    #return_ : { receipt : Nat };
+  };
 
   public type Dates = { postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
 
@@ -109,6 +115,12 @@ module {
     #setBookDepot : { book : BookId; depot : Text };
     #assignDealDepot : { deal : TT.DealId; depot : Text };
     #transferDepot : { lot : TT.DealId; from : Text; to : Text; nominal : Nat; reference : Text };
+    /// The principal holding a depot on the instrument ledgers, or none for the desk's own account.
+    #setDepotAccount : { depot : Text; account : ?Principal };
+    /// A transfer between a depot the desk holds and one another party holds, as a delivery free of payment
+    /// through the venue: the desk delivers to the receiving depot's holder, or names the delivery the sending
+    /// depot's holder opened.
+    #instructDepotTransfer : { lot : TT.DealId; from : Text; to : Text; nominal : Nat; deliveryId : ?Nat; reference : Text };
     #announceCorporateAction : { announcement : CuT.Announcement };
     #cancelCorporateAction : { action : CuT.ActionId; reason : Text };
     #processCorporateAction : { action : CuT.ActionId; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
@@ -151,6 +163,9 @@ module {
     #openCollateralSubstitution : { agreement : CoT.AgreementId; lot : TT.DealId; nominal : Nat; cashReturned : Nat; currency : Text };
     #settleCollateralSubstitution : { agreement : CoT.AgreementId; substitution : Nat; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
     #settleCollateralInterest : { agreement : CoT.AgreementId; currency : Text; postingDate : Day; valueDate : Day; period : JT.PeriodId; narration : Text };
+    /// A securities movement under an agreement settled as a delivery free of payment through the venue: the desk
+    /// delivers a pledge or a return; the counterparty delivers a release or a receipt, whose delivery is named.
+    #instructCollateralDelivery : { agreement : CoT.AgreementId; move : CollateralDeliveryMove; counterparty : Principal; reference : Text };
     // ── limits: the tree, the counterparties' group and country, the risk sweep ──
     #setLimitNode : { node : LT.Node };
     #removeLimitNode : { node : LT.NodeId };

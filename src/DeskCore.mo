@@ -208,6 +208,7 @@ module {
       case (#setBookDepot(x)) ?x.book;
       case (#assignDealDepot(x)) bookOfDeal(s, x.deal);
       case (#transferDepot(x)) bookOfDeal(s, x.lot);
+      case (#instructDepotTransfer(x)) bookOfDeal(s, x.lot);
       case (#instructSettlement(x)) bookOfDeal(s, x.deal);
       case (#splitDeal(x)) bookOfDeal(s, x.deal);
       case (#buyIn(x)) bookOfInstruction(s, x.instruction);
@@ -220,10 +221,11 @@ module {
       case (#substituteCollateral(x)) bookOfRepo(s, x.repo);
       case (#settleLoanLeg(x)) bookOfLoan(s, x.loan);
       case (#recallLoan(x)) bookOfLoan(s, x.loan);
-      case (#instructFinancing(x)) { switch (x.family) { case (#repo) bookOfRepo(s, x.id); case (#loan) bookOfLoan(s, x.id); case (#treasury) bookOfDeal(s, x.id); case (#collateral) bookOfSubstitution(s, x.id) } };
+      case (#instructFinancing(x)) { switch (x.family) { case (#repo) bookOfRepo(s, x.id); case (#loan) bookOfLoan(s, x.id); case (#treasury or #custody) bookOfDeal(s, x.id); case (#collateral) bookOfSubstitution(s, x.id) } };
       case (#pledgeCollateral(x)) bookOfDeal(s, x.lot);
       case (#openCollateralSubstitution(x)) bookOfDeal(s, x.lot);
       case (#settleCollateralSubstitution(x)) bookOfSubstitution(s, x.substitution);
+      case (#instructCollateralDelivery(x)) { switch (x.move) { case (#pledge(m)) bookOfDeal(s, m.lot); case (#release(m)) bookOfSubstitution(s, m.pledge); case (#return_(m)) bookOfSubstitution(s, m.receipt); case (#receive(_)) null } };
       case (#designateHedge(x)) bookOfDeal(s, x.hedging);
       case (#assessHedge(x)) { switch (HedgeCore.hedge(s.hedges, x.hedge)) { case (?h) bookOfDeal(s, h.hedging); case null null } };
       case (#dedesignateHedge(x)) { switch (HedgeCore.hedge(s.hedges, x.hedge)) { case (?h) bookOfDeal(s, h.hedging); case null null } };
@@ -281,6 +283,7 @@ module {
       case (#resetCallRate(x)) balanceOfCall(s, x.call);
       case (#settleCall(x)) balanceOfCall(s, x.call);
       case (#transferDepot(x)) { switch (TreasuryCore.row(s.treasury, x.lot)) { case (?r) [(treasuryRowCurrency(s, r), x.nominal)]; case null [] } };
+      case (#instructDepotTransfer(x)) { switch (TreasuryCore.row(s.treasury, x.lot)) { case (?r) [(treasuryRowCurrency(s, r), x.nominal)]; case null [] } };
       case (#instructSettlement(x)) notionalOfDeal(s, x.deal);
       case (#splitDeal(x)) notionalOfDeal(s, x.deal);
       case (#buyIn(x)) { switch (SettlementCore.instruction(s.settlement, x.instruction)) { case (?i) notionalOfDeal(s, i.deal); case null [] } };
@@ -537,18 +540,42 @@ module {
     }
   };
   /// A lot of the desk's own that can be pledged: a settled purchase, held in a depot with enough available.
-  func pledgeableLot(s : State, lot : Nat, nominal : Nat) : Res<(TreasuryCore.DealRow, Text)> {
+  func pledgeableLot(s : State, lot : Nat, nominal : Nat) : Res<(TreasuryCore.DealRow, Text)> { pledgeableLotHeld(s, lot, nominal, false) };
+  /// `deskHeld`: only a depot the desk's own account holds qualifies, as a delivery through the venue escrows
+  /// from that account.
+  func pledgeableLotHeld(s : State, lot : Nat, nominal : Nat, deskHeld : Bool) : Res<(TreasuryCore.DealRow, Text)> {
     let r = switch (treasuryRow(s, lot)) { case (#err(e)) return #err(e); case (#ok(r)) r };
     if (r.kind != 4 or (r.flags & TreasuryCore.F_BUY) == 0) return custodyErr(#LotNotIn({ lot; state = "not a purchase" }));
     if (nominal == 0) return collateralErr(#InvalidMove({ reason = "a pledge is a positive nominal" }));
     var best : ?(Text, Nat) = null;
     for ((h, _) in CustodyCore.holdingsOfLot(s.custody, lot).vals()) {
       let d = CustodyCore.depotIdOfHash(s.custody, h);
+      if (deskHeld and not CustodyCore.heldByDesk(s.custody, d)) continue;
       let av = CustodyCore.available(s.custody, lot, d);
       if (av >= nominal) return #ok((r, d));
       switch (best) { case (?(_, b)) { if (av > b) best := ?(d, av) }; case null best := ?(d, av) };
     };
     switch (best) { case (?(d, av)) custodyErr(#DepotShort({ depot = d; isin = r.isin; held = av; wanted = nominal })); case null custodyErr(#LotNotIn({ lot; state = "not held in a depot" })) }
+  };
+  /// The settlement of a delivery free of payment from the venue's receipt: the row live or returned, the custody
+  /// movement the settlement is (a pledge's encumbrance was taken when it was instructed), the call credited by
+  /// the securities' value on the day when the movement runs the call's way. No cash moves, so nothing posts.
+  public func planDeliverySettlement(s : State, i : SettlementCore.InstructionRow, day : Nat) : Res<Plan> {
+    let ?r0 = CollateralCore.securitiesRow(s.collateral, i.deal) else return collateralErr(#UnknownPledge({ agreement = ""; id = i.deal }));
+    let a = switch (agreementRow(s, r0.agreement)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+    let wanted : CoT.SecuritiesState = if (i.leg == 0) #delivering else #returning;
+    let r = switch (CollateralCore.requireSecurities(s.collateral, r0.agreement, i.deal, wanted)) { case (#err(e)) return collateralErr(e); case (#ok(r)) r };
+    let move : CoT.DeliveryMove = switch (i.leg == 0, r.given) { case (true, true) #pledge; case (true, false) #receive; case (false, true) #release; case (false, false) #return_ };
+    let value = switch (poolSecuritiesValue(s, a, r.isin, r.nominal, day)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+    let credit = callCreditFor(s, a, i.role == #maker, value);
+    let reference = "collateral/" # r.agreement;
+    let custody : [T.Event] = switch (move) {
+      case (#pledge) [];
+      case (#release) { switch (r.lot) { case (?lot) [#custody(#released({ lot; depot = r.depot; nominal = r.nominal; reference; day }))]; case null [] } };
+      case (#receive) [#custody(#collateralReceived({ isin = r.isin; depot = r.depot; nominal = r.nominal; reference; day }))];
+      case (#return_) [#custody(#collateralReturned({ isin = r.isin; depot = r.depot; nominal = r.nominal; reference; day }))];
+    };
+    #ok({ event = ?#collateral(#deliverySettled({ agreement = r.agreement; id = i.deal; move; callCredit = credit; day })); extra = Array.concat<T.Event>(custody, callMetAfter(s, a, credit, day)); journal = [] })
   };
   /// The settlement of a substitution: the securities live in the pool, the cash comes back, the call credited
   /// by the net the desk delivered.
@@ -772,6 +799,7 @@ module {
       case (#repo) { switch (FinancingCore.repo(s.financing, i.deal)) { case (?r) ?(r.depot, r.isin); case null null } };
       case (#loan) { switch (FinancingCore.loan(s.financing, i.deal)) { case (?l) ?(l.depot, l.isin); case null null } };
       case (#collateral) { switch (CollateralCore.securitiesRow(s.collateral, i.deal)) { case (?r) ?(r.depot, r.isin); case null null } };
+      case (#custody) { switch (CustodyCore.transfer(s.custody, i.id), TreasuryCore.row(s.treasury, i.deal)) { case (?t, ?r) ?(CustodyCore.depotIdOfHash(s.custody, t.fromHash), r.isin); case (_) null } };
     }
   };
   /// The desk's instructions of a depot with a cycle in a window, as the custodian's transaction report is
@@ -937,9 +965,16 @@ module {
       let plan = switch (i.family) {
         case (#repo) planRepoLeg(s, bb, js, journalCaller, now, i.deal, i.leg, "tachyon", day, day, period, "settled through Tachyon, trade " # Nat.toText(i.tradeId));
         case (#loan) planLoanLeg(s, bb, js, journalCaller, now, i.deal, i.leg, "tachyon", day, day, period, "settled through Tachyon, trade " # Nat.toText(i.tradeId));
+        case (#custody) {
+          if (CustodyCore.transfer(s.custody, i.id) == null) return custodyErr(#InvalidTerms({ reason = "no transfer stands under instruction " # Nat.toText(i.id) }));
+          #ok({ event = ?#custody(#transferSettled({ instruction = i.id; day })); extra = []; journal = [] })
+        };
         case (#collateral) {
-          let ?r = CollateralCore.securitiesRow(s.collateral, i.deal) else return collateralErr(#UnknownPledge({ agreement = ""; id = i.deal }));
-          planSubstitutionSettlement(s, js, journalCaller, now, r.agreement, i.deal, "tachyon", day, day, period, "settled through Tachyon, trade " # Nat.toText(i.tradeId))
+          if (i.delivery) planDeliverySettlement(s, i, day)
+          else {
+            let ?r = CollateralCore.securitiesRow(s.collateral, i.deal) else return collateralErr(#UnknownPledge({ agreement = ""; id = i.deal }));
+            planSubstitutionSettlement(s, js, journalCaller, now, r.agreement, i.deal, "tachyon", day, day, period, "settled through Tachyon, trade " # Nat.toText(i.tradeId))
+          }
         };
         case (#treasury) return financingErr(#InvalidTerms({ reason = "unreachable" }));
       };
@@ -970,6 +1005,11 @@ module {
   /// The opening block of a repo or a loan: the counterparty, the reference and the cash account.
   public func repoOpeningOf(bb : Blocks, id : Nat) : (Text, Text, ?TT.CashAccount) {
     switch (bb.get(id)) { case (?b) { switch (b.event) { case (#financing(#repoOpened(x))) (x.counterparty.name, x.reference, ?x.terms.cashAccount); case (_) ("", "", null) } }; case null ("", "", null) }
+  };
+  /// The reference of a depot transfer through the venue: the transfer's own block, which precedes its instruction.
+  public func transferReferenceOf(bb : Blocks, instruction : Nat) : Text {
+    if (instruction == 0) return "";
+    switch (bb.get(instruction - 1)) { case (?b) { switch (b.event) { case (#custody(#transferInstructed(x))) { if (x.instruction == instruction) x.reference else "" }; case (_) "" } }; case null "" }
   };
   public func loanOpeningOf(bb : Blocks, id : Nat) : (Text, Text, ?TT.CashAccount) {
     switch (bb.get(id)) { case (?b) { switch (b.event) { case (#financing(#loanOpened(x))) (x.counterparty.name, x.reference, ?x.terms.cashAccount); case (_) ("", "", null) } }; case null ("", "", null) }
@@ -1093,6 +1133,7 @@ module {
         #ok({ isin = r.isin; currency = r.currency; nominal = r.nominal; cash = r.cashReturned; deskDelivers = true; cycleDay = day })
       };
       case (#treasury) financingErr(#InvalidTerms({ reason = "a treasury deal is instructed by its own act" }));
+      case (#custody) financingErr(#InvalidTerms({ reason = "a depot transfer is instructed as a delivery" }));
     }
   };
   func valuationErr<X>(e : VT.Error) : Res<X> { #err(#ValuationError({ error = e })) };
@@ -1459,7 +1500,20 @@ module {
         custodyPlan(CustodyCore.planSetBookDepot(s.custody, x.book, x.depot, today))
       };
       case (#assignDealDepot(x)) custodyPlan(CustodyCore.planAssignDealDepot(s.custody, s.treasury, x.deal, x.depot, today));
-      case (#transferDepot(x)) custodyPlan(CustodyCore.planTransfer(s.custody, x.lot, x.from, x.to, x.nominal, x.reference, today));
+      case (#transferDepot(x)) {
+        // a book movement stays within one holder's accounts; across holders the venue delivers
+        if (CustodyCore.depotAccount(s.custody, x.from) != CustodyCore.depotAccount(s.custody, x.to)) return custodyErr(#InvalidTerms({ reason = "the depots are held by different accounts: the transfer is instructed as a delivery" }));
+        custodyPlan(CustodyCore.planTransfer(s.custody, x.lot, x.from, x.to, x.nominal, x.reference, today))
+      };
+      case (#setDepotAccount(x)) custodyPlan(CustodyCore.planSetDepotAccount(s.custody, x.depot, x.account, today));
+      case (#instructDepotTransfer(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        let r = switch (treasuryRow(s, x.lot)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        if (r.kind != 4 or (r.flags & TreasuryCore.F_BUY) == 0) return custodyErr(#LotNotIn({ lot = x.lot; state = "not a purchase" }));
+        let side = switch (CustodyCore.planInstructTransfer(s.custody, x.lot, x.from, x.to, x.nominal, x.reference)) { case (#err(e)) return custodyErr(e); case (#ok(v)) v };
+        let ev = switch (SettlementCore.planInstructDelivery(s.settlement, #custody, x.lot, 0, r.isin, x.nominal, ledgerUnitOf(s, r.isin), side.deskDelivers, today, side.counterparty, x.deliveryId, x.reference, today)) { case (#err(e)) return settlementErr(e); case (#ok(ev)) ev };
+        #ok({ event = ?#custody(#transferInstructed({ lot = x.lot; from = x.from; to = x.to; nominal = x.nominal; reference = x.reference; instruction = s.height + 1; day = today })); extra = [#settlement(ev)]; journal = [] })
+      };
       case (#announceCorporateAction(x)) custodyPlan(CustodyCore.planAnnounce(s.custody, s.treasury, x.announcement, today));
       case (#cancelCorporateAction(x)) custodyPlan(CustodyCore.planCancel(s.custody, x.action, x.reason, today));
       // ── settlement through Tachyon ──
@@ -1474,6 +1528,8 @@ module {
         let r = switch (treasuryRow(s, x.deal)) { case (#err(e)) return #err(e); case (#ok(r)) r };
         let kind = switch (treasuryKind(bb, r)) { case (#err(e)) return #err(e); case (#ok(k)) k };
         let #security(t) = kind else return settlementErr(#DealNotSettleable({ deal = x.deal; reason = "not a security" }));
+        // a sale delivers from its depot: checked here, before the venue escrows from the desk's account
+        switch (saleDepotCheck(s, r, kind, 0)) { case (?e) return #err(e); case null {} };
         let (amount, document) = switch (instructionDocument(s, js, bb, r, t)) { case (#err(e)) return #err(e); case (#ok(v)) v };
         settlementPlan(SettlementCore.planInstruct(s.settlement, s.treasury, r, t, amount, ledgerUnitOf(s, t.isin), x.counterparty, x.tradeId, x.reference, Sha256.fromBlob(#sha256, Text.encodeUtf8(document)), today))
       };
@@ -1845,6 +1901,40 @@ module {
       case (#settleCollateralSubstitution(x)) {
         switch (SettlementCore.openInstructionOf(s.settlement, x.substitution, 0)) { case (?i) return settlementErr(#AlreadyInstructed({ deal = x.substitution; instruction = i.id })); case null {} };
         planSubstitutionSettlement(s, js, journalCaller, now, x.agreement, x.substitution, authId, x.postingDate, x.valueDate, x.period, x.narration)
+      };
+      case (#instructCollateralDelivery(x)) {
+        switch (Auth.requireFeature(a, T.FEATURE_TREASURY, s.height)) { case (?e) return #err(e); case null {} };
+        let ag = switch (agreementRow(s, x.agreement)) { case (#err(e)) return #err(e); case (#ok(r)) r };
+        // the movement's row: a pledge or a receipt opens one at this height; a release or a return names a live one
+        let (id, leg, lot, isin, depot, nominal, deskDelivers, deliveryId, move) : (Nat, Nat, ?Nat, Text, Text, Nat, Bool, ?Nat, CoT.DeliveryMove) = switch (x.move) {
+          case (#pledge(m)) {
+            let (lotRow, depot) = switch (pledgeableLotHeld(s, m.lot, m.nominal, true)) { case (#err(e)) return #err(e); case (#ok(v)) v };
+            (s.height, 0, ?m.lot, lotRow.isin, depot, m.nominal, true, null, #pledge)
+          };
+          case (#release(m)) {
+            let r = switch (CollateralCore.requireSecurities(s.collateral, x.agreement, m.pledge, #live)) { case (#err(e)) return collateralErr(e); case (#ok(r)) r };
+            let ?lot = r.lot else return collateralErr(#PledgeNotIn({ id = m.pledge; state = "received"; wanted = "pledged by the desk" }));
+            if (not CustodyCore.heldByDesk(s.custody, r.depot)) return custodyErr(#InvalidTerms({ reason = "depot " # r.depot # " is held by another account; the venue pays the desk's own" }));
+            (m.pledge, 1, ?lot, r.isin, r.depot, r.nominal, false, ?m.deliveryId, #release)
+          };
+          case (#receive(m)) {
+            if (m.nominal == 0) return collateralErr(#InvalidMove({ reason = "a receipt is a positive nominal" }));
+            if (CustodyCore.depot(s.custody, m.depot) == null) return custodyErr(#UnknownDepot({ depot = m.depot }));
+            if (not CustodyCore.heldByDesk(s.custody, m.depot)) return custodyErr(#InvalidTerms({ reason = "depot " # m.depot # " is held by another account; the venue pays the desk's own" }));
+            (s.height, 0, null, m.isin, m.depot, m.nominal, false, ?m.deliveryId, #receive)
+          };
+          case (#return_(m)) {
+            let r = switch (CollateralCore.requireSecurities(s.collateral, x.agreement, m.receipt, #live)) { case (#err(e)) return collateralErr(e); case (#ok(r)) r };
+            if (r.given) return collateralErr(#PledgeNotIn({ id = m.receipt; state = "pledged by the desk"; wanted = "received" }));
+            if (not CustodyCore.heldByDesk(s.custody, r.depot)) return custodyErr(#InvalidTerms({ reason = "depot " # r.depot # " is held by another account; the desk delivers from its own" }));
+            (m.receipt, 1, null, r.isin, r.depot, r.nominal, true, null, #return_)
+          };
+        };
+        // priced and haircut today, so the settlement can value it when the receipt lands
+        switch (poolSecuritiesValue(s, ag, isin, nominal, today)) { case (#err(e)) return #err(e); case (#ok(_)) {} };
+        let ev = switch (SettlementCore.planInstructDelivery(s.settlement, #collateral, id, leg, isin, nominal, ledgerUnitOf(s, isin), deskDelivers, today, x.counterparty, deliveryId, x.reference, today)) { case (#err(e)) return settlementErr(e); case (#ok(ev)) ev };
+        let custody : [T.Event] = switch (move, lot) { case (#pledge, ?l) [#custody(#pledged({ lot = l; depot; nominal; reference = "collateral/" # x.agreement; day = today }))]; case (_) [] };
+        #ok({ event = ?#collateral(#deliveryInstructed({ agreement = x.agreement; id; move; lot; isin; depot; nominal; instruction = s.height + 1; day = today })); extra = Array.concat<T.Event>([#settlement(ev)], custody); journal = [] })
       };
       case (#settleCollateralInterest(x)) {
         let p = switch (collateralPolicyOf(s)) { case (#err(e)) return #err(e); case (#ok(p)) p };

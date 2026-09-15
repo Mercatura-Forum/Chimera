@@ -27,8 +27,9 @@ module {
 
   /// What an instruction settles: a treasury deal's delivery leg, a repo's start (0) or close (1) leg, a loan's
   /// start (0) or return (1) leg.
-  public type Family = { #treasury; #repo; #loan; #collateral };
-  public func familyText(f : Family) : Text { switch (f) { case (#treasury) "treasury"; case (#repo) "repo"; case (#loan) "loan"; case (#collateral) "collateral" } };
+  /// `#custody`: a transfer of a lot between a depot the desk holds and one another party holds, free of payment.
+  public type Family = { #treasury; #repo; #loan; #collateral; #custody };
+  public func familyText(f : Family) : Text { switch (f) { case (#treasury) "treasury"; case (#repo) "repo"; case (#loan) "loan"; case (#collateral) "collateral"; case (#custody) "custody" } };
   public type Role = { #maker; #taker };
   public func roleText(r : Role) : Text { switch (r) { case (#maker) "maker"; case (#taker) "taker" } };
 
@@ -51,6 +52,9 @@ module {
     /// A fill of a market cycle: the trade is the engine's, settled by its relayer; the desk observes it and
     /// verifies the receipt, and opens or funds nothing unless that trade aborted.
     matched : Bool;
+    /// A delivery free of payment: one leg with no cash against it, opened by the desk as maker or accepted by
+    /// the desk as taker (`tradeId` then names the counterparty's delivery), and settled from its receipt.
+    delivery : Bool;
   };
 
   public type Event = {
@@ -65,6 +69,11 @@ module {
     #tradeOpened : { instruction : InstructionId; tradeId : Nat; escrowed : Bool; note : Text; day : Day };
     /// A purchase's trade read back from Tachyon and found to match the instruction leg for leg.
     #tradeVerified : { instruction : InstructionId; tradeId : Nat; day : Day };
+    /// A delivery opened by the desk as maker: Tachyon's delivery id and whether the leg went into escrow in the
+    /// same call.
+    #deliveryOpened : { instruction : InstructionId; deliveryId : Nat; escrowed : Bool; note : Text; day : Day };
+    /// The counterparty's delivery read back, found to match the instruction, and accepted by the desk as taker.
+    #deliveryAccepted : { instruction : InstructionId; deliveryId : Nat; delivered : Bool; note : Text; day : Day };
     /// The reply to the desk's own funding call.
     #fundingRecorded : { instruction : InstructionId; tradeId : Nat; escrowed : Bool; bothEscrowed : Bool; note : Text; day : Day };
     /// A call that did not do what was asked, with the reply or the reason; the instruction stays where it was.
@@ -111,7 +120,7 @@ module {
   public type InstructionView = {
     id : InstructionId; family : Text; deal : Nat; leg : Nat; cycle : Day; role : Text; counterparty : Principal;
     assetLedger : Principal; assetAmount : Nat; cashLedger : Principal; cashAmount : Nat; tradeId : ?Nat;
-    state : Text; fails : Nat; reference : Text; lastBlock : Nat;
+    state : Text; fails : Nat; reference : Text; lastBlock : Nat; escrowed : Bool; delivery : Bool;
   };
   public type CycleView = { businessDate : Day; market : Text; priceSource : Text; state : Text; settled : Nat; failed : Nat; pending : Nat; instructions : Nat };
   /// What a drive did: the step taken and the instruction's state after it.

@@ -53,7 +53,7 @@ module {
   public let announcement : CuT.Announcement = { isin = "EG0000012345"; kind = #coupon({ perHundredMicro = 6_000_000 }); recordDate = 20700; exDate = 20699; paymentDate = 20702; source = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob };
 
   public func venue() : ST.Venue { { core = bob(); deadlineSecs = 3600; recycleLimit = 3; claimsAccount = "1540" } };
-  public func instruction() : ST.Instruction { { family = #treasury; deal = 40; leg = 0; cycle = 20672; role = #taker; counterparty = alice(); assetLedger = bob(); assetAmount = 10_000_000_00; cashLedger = alice(); cashAmount = 9_850_000_00; tradeId = ?7; reference = "security-1"; documentHash = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob; matched = false } };
+  public func instruction() : ST.Instruction { { family = #treasury; deal = 40; leg = 0; cycle = 20672; role = #taker; counterparty = alice(); assetLedger = bob(); assetAmount = 10_000_000_00; cashLedger = alice(); cashAmount = 9_850_000_00; tradeId = ?7; reference = "security-1"; documentHash = "\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07\07" : Blob; matched = false; delivery = false } };
 
   public let financingPolicy : FT.Policy = { repoPayable = "2600"; reverseRepoReceivable = "1600"; repoInterestPayable = "2610"; repoInterestReceivable = "1610"; repoInterestExpense = "5600"; repoInterestIncome = "4600"; marginCashGiven = "1620"; marginCashReceived = "2620"; lendingFeeReceivable = "1630"; lendingFeeIncome = "4630"; cashCollateralPayable = "2630"; rebateExpense = "5630"; manufacturedPaymentReceivable = "1640"; marginGraceDays = 2 };
   public let repoTerms : FT.RepoTerms = { reverse = false; currency = "EGP"; cash = 9_500_000_00; rateBps = 1900; dayCount = #a004_Act365Fixed; start = 20670; maturity = ?20700; collateral = { isin = "EG0000012345"; nominal = 10_000_000_00 }; haircutBps = 500; thresholdBps = 200; cashAccount = cash; depot = "DEPOT-CITI" };
@@ -121,6 +121,7 @@ module {
       { family = "openCollateralSubstitution"; command = #openCollateralSubstitution({ agreement = "CSA-CITI"; lot = 40; nominal = 1_000_000_00; cashReturned = 900_000_00; currency = "EGP" }) },
       { family = "settleCollateralSubstitution"; command = #settleCollateralSubstitution({ agreement = "CSA-CITI"; substitution = 122; postingDate = 20672; valueDate = 20672; period = "2026-08"; narration = "substitution" }) },
       { family = "settleCollateralInterest"; command = #settleCollateralInterest({ agreement = "CSA-CITI"; currency = "EGP"; postingDate = 20700; valueDate = 20700; period = "2026-08"; narration = "collateral interest" }) },
+      { family = "instructCollateralDelivery"; command = #instructCollateralDelivery({ agreement = "CSA-CITI"; move = #release({ pledge = 120; deliveryId = 14 }); counterparty = alice(); reference = "collateral/CSA-CITI/120" }) },
       { family = "setLimitNode"; command = #setLimitNode({ node }) },
       { family = "removeLimitNode"; command = #removeLimitNode({ node = "TENOR-1Y" }) },
       { family = "amendCounterparty"; command = #amendCounterparty({ counterparty = counterpartyRecord }) },
@@ -156,6 +157,8 @@ module {
       { family = "setBookDepot"; command = #setBookDepot({ book = "BR01"; depot = "DEPOT-CITI" }) },
       { family = "assignDealDepot"; command = #assignDealDepot({ deal = 40; depot = "DEPOT-CITI" }) },
       { family = "transferDepot"; command = #transferDepot({ lot = 40; from = "DEPOT-CITI"; to = "DEPOT-HSBC"; nominal = 1_000_000_00; reference = "fop-1" }) },
+      { family = "setDepotAccount"; command = #setDepotAccount({ depot = "DEPOT-HSBC"; account = ?bob() }) },
+      { family = "instructDepotTransfer"; command = #instructDepotTransfer({ lot = 40; from = "DEPOT-CITI"; to = "DEPOT-HSBC"; nominal = 1_000_000_00; deliveryId = null; reference = "fop-2" }) },
       { family = "announceCorporateAction"; command = #announceCorporateAction({ announcement }) },
       { family = "cancelCorporateAction"; command = #cancelCorporateAction({ action = 70; reason = "withdrawn by the issuer" }) },
       { family = "processCorporateAction"; command = #processCorporateAction({ action = 70; postingDate = 20702; valueDate = 20702; period = "2026-08"; narration = "coupon" }) },
@@ -259,6 +262,10 @@ module {
       #custody(#bookDepotSet({ book = "BR01"; depot = "DEPOT-CITI"; day = 20670 })),
       #custody(#dealDepotAssigned({ deal = 40; depot = "DEPOT-CITI"; day = 20670 })),
       #custody(#transferred({ lot = 40; from = "DEPOT-CITI"; to = "DEPOT-HSBC"; nominal = 1_000_000_00; reference = "fop-1"; day = 20680 })),
+      #custody(#depotAccountSet({ depot = "DEPOT-HSBC"; account = ?bob(); day = 20680 })),
+      #custody(#depotAccountSet({ depot = "DEPOT-HSBC"; account = null; day = 20681 })),
+      #custody(#transferInstructed({ lot = 40; from = "DEPOT-CITI"; to = "DEPOT-HSBC"; nominal = 1_000_000_00; reference = "fop-2"; instruction = 127; day = 20680 })),
+      #custody(#transferSettled({ instruction = 127; day = 20681 })),
       #custody(#announced({ announcement; day = 20690 })),
       #custody(#cancelled({ action = 70; reason = "withdrawn"; day = 20691 })),
       #custody(#entitlementRecorded({ action = 70; lot = 40; depot = "DEPOT-CITI"; nominal = 1_000_000_00; amount = 60_000_00; basis = #contractual; day = 20700 })),
@@ -283,6 +290,9 @@ module {
       #settlement(#reclaimed({ instruction = 90; tradeId = 7; note = "legB refund ok"; day = 20673 })),
       #settlement(#tradeReset({ instruction = 90; previous = 7; day = 20673 })),
       #settlement(#tradeAssigned({ instruction = 90; tradeId = 8; day = 20673 })),
+      #settlement(#instructed({ instruction = { instruction() with family = #collateral; deal = 123; cashAmount = 0; role = #maker; tradeId = null; matched = false; delivery = true }; day = 20673 })),
+      #settlement(#deliveryOpened({ instruction = 91; deliveryId = 14; escrowed = true; note = "legA escrowed"; day = 20673 })),
+      #settlement(#deliveryAccepted({ instruction = 92; deliveryId = 15; delivered = true; note = "legA to taker"; day = 20673 })),
       #settlement(#boughtIn({ instruction = 90; replacement = 120; claim = 15_000_00; day = 20675 })),
       #settlement(#cancelled({ instruction = 90; ourConsent = h(1); theirConsent = h(2); reason = "both parties agree"; day = 20675 })),
       #settlement(#statusReceived({ instruction = 90; status = "SttlmSts/Pdg"; quantity = 10_000_000_00; amount = 9_850_000_00; matched = true; documentHash = h(6); day = 20671 })),
@@ -332,6 +342,9 @@ module {
       #collateral(#callRaised({ agreement = "CSA-CITI"; id = 130; amount = 200_000_00; deliver = false; day = 20672; due = 20673 })),
       #collateral(#callMet({ agreement = "CSA-CITI"; call = 130; day = 20673 })),
       #collateral(#callSuperseded({ agreement = "CSA-CITI"; call = 130; outstanding = 50_000_00; day = 20674 })),
+      #collateral(#deliveryInstructed({ agreement = "CSA-CITI"; id = 123; move = #pledge; lot = ?40; isin = "EG0000012345"; depot = "DEPOT-CITI"; nominal = 1_000_000_00; instruction = 124; day = 20673 })),
+      #collateral(#deliveryInstructed({ agreement = "CSA-CITI"; id = 121; move = #return_; lot = null; isin = "EG0000012345"; depot = "DEPOT-CITI"; nominal = 500_000_00; instruction = 126; day = 20673 })),
+      #collateral(#deliverySettled({ agreement = "CSA-CITI"; id = 123; move = #pledge; callCredit = 950_000_00; day = 20674 })),
       #limits(#nodeSet({ node; day = 20670 })),
       #limits(#nodeSet({ node = tenorNode; day = 20670 })),
       #limits(#nodeSet({ node = { id = "CLS-SOV"; kind = #instrumentClass(#sovereign); parent = null; currency = "EGP"; limit = 1 }; day = 20670 })),

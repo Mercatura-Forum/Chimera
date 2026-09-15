@@ -81,6 +81,14 @@ module {
     /// Collateral received from a counterparty and held in a depot: never a lot of the desk's own.
     #collateralReceived : { isin : Text; depot : Text; nominal : Nat; reference : Text; day : Day };
     #collateralReturned : { isin : Text; depot : Text; nominal : Nat; reference : Text; day : Day };
+    /// The principal that holds a depot's securities on the instrument ledgers: another party's account (a
+    /// custodian's) when set, the desk's own when cleared. A transfer between a depot the desk holds and one
+    /// another party holds is a delivery through the venue; between two of one holder it is a book movement.
+    #depotAccountSet : { depot : Text; account : ?Principal; day : Day };
+    /// A transfer in the venue's hands: the nominal encumbered in the depot it leaves until the receipt lands.
+    #transferInstructed : { lot : TT.DealId; from : Text; to : Text; nominal : Nat; reference : Text; instruction : Nat; day : Day };
+    /// The receipt landed: the encumbrance lifted, the nominal moved.
+    #transferSettled : { instruction : Nat; day : Day };
   };
 
   public type Error = {
@@ -101,5 +109,7 @@ module {
   public type ActionView = { id : ActionId; isin : Text; kind : Text; recordDate : Day; exDate : Day; paymentDate : Day; state : Text; lots : Nat; entitled : Nat; paid : Nat; lastBlock : Nat };
   public type EntitlementView = { action : ActionId; lot : TT.DealId; depot : Text; nominal : Nat; amount : Nat; basis : Text; claimed : Bool; paid : Bool };
   public type Status = { instruments : Nat; depots : Nat; holdings : Nat; actions : Nat; entitlements : Nat; transfers : Nat };
+  /// A transfer through the venue as recorded: the lot, the depots, the nominal, whether the receipt has landed.
+  public type TransferView = { instruction : Nat; lot : TT.DealId; from : Text; to : Text; nominal : Nat; settled : Bool };
   public type AvailableView = { depot : Text; isin : Text; held : Nat; encumbered : Nat; available : Nat; received : Nat };
 }

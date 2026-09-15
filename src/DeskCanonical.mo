@@ -188,6 +188,9 @@ module {
       case (#lentReturned(x)) { w.byte(0x11); w.nat(x.lot); w.text(x.depot); w.nat(x.nominal); w.text(x.reference); w.nat(x.day) };
       case (#collateralReceived(x)) { w.byte(0x12); w.text(x.isin); w.text(x.depot); w.nat(x.nominal); w.text(x.reference); w.nat(x.day) };
       case (#collateralReturned(x)) { w.byte(0x13); w.text(x.isin); w.text(x.depot); w.nat(x.nominal); w.text(x.reference); w.nat(x.day) };
+      case (#depotAccountSet(x)) { w.byte(0x14); w.text(x.depot); TyCan.writeOptPrincipal(w, x.account); w.nat(x.day) };
+      case (#transferInstructed(x)) { w.byte(0x15); w.nat(x.lot); w.text(x.from); w.text(x.to); w.nat(x.nominal); w.text(x.reference); w.nat(x.instruction); w.nat(x.day) };
+      case (#transferSettled(x)) { w.byte(0x16); w.nat(x.instruction); w.nat(x.day) };
     }
   };
   func rCustodyEvent(r : JC.Reader) : ?CuT.Event {
@@ -215,6 +218,9 @@ module {
       case (?0x11) { let ?lot = r.nat() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; let ?day = r.nat() else return null; ?#lentReturned({ lot; depot; nominal; reference; day }) };
       case (?0x12) { let ?isin = r.text() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; let ?day = r.nat() else return null; ?#collateralReceived({ isin; depot; nominal; reference; day }) };
       case (?0x13) { let ?isin = r.text() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; let ?day = r.nat() else return null; ?#collateralReturned({ isin; depot; nominal; reference; day }) };
+      case (?0x14) { let ?depot = r.text() else return null; let ?account = TyCan.readOptPrincipal(r) else return null; let ?day = r.nat() else return null; ?#depotAccountSet({ depot; account; day }) };
+      case (?0x15) { let ?lot = r.nat() else return null; let ?from = r.text() else return null; let ?to = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; let ?instruction = r.nat() else return null; let ?day = r.nat() else return null; ?#transferInstructed({ lot; from; to; nominal; reference; instruction; day }) };
+      case (?0x16) { let ?instruction = r.nat() else return null; let ?day = r.nat() else return null; ?#transferSettled({ instruction; day }) };
       case (_) null;
     }
   };
@@ -230,17 +236,17 @@ module {
   func rCycle(r : JC.Reader) : ?ST.Cycle { let ?businessDate = r.nat() else return null; let ?market = r.text() else return null; let ?priceSource = r.text() else return null; ?{ businessDate; market; priceSource } };
   func wRole(w : JC.Writer, x : ST.Role) { w.byte(switch (x) { case (#maker) 1; case (#taker) 2 }) };
   func rRole(r : JC.Reader) : ?ST.Role { switch (r.byte()) { case (?1) ?#maker; case (?2) ?#taker; case (_) null } };
-  func wFamily(w : JC.Writer, f : ST.Family) { w.byte(switch (f) { case (#treasury) 0; case (#repo) 1; case (#loan) 2; case (#collateral) 3 }) };
-  func rFamily(r : JC.Reader) : ?ST.Family { switch (r.byte()) { case (?0) ?#treasury; case (?1) ?#repo; case (?2) ?#loan; case (?3) ?#collateral; case (_) null } };
+  func wFamily(w : JC.Writer, f : ST.Family) { w.byte(switch (f) { case (#treasury) 0; case (#repo) 1; case (#loan) 2; case (#collateral) 3; case (#custody) 4 }) };
+  func rFamily(r : JC.Reader) : ?ST.Family { switch (r.byte()) { case (?0) ?#treasury; case (?1) ?#repo; case (?2) ?#loan; case (?3) ?#collateral; case (?4) ?#custody; case (_) null } };
   func wInstruction(w : JC.Writer, i : ST.Instruction) {
     wFamily(w, i.family); w.nat(i.deal); w.nat(i.leg); w.nat(i.cycle); wRole(w, i.role); w.principal(i.counterparty); w.principal(i.assetLedger); w.nat(i.assetAmount); w.principal(i.cashLedger); w.nat(i.cashAmount);
-    w.optNat(i.tradeId); w.text(i.reference); w.blob(i.documentHash); w.bool(i.matched);
+    w.optNat(i.tradeId); w.text(i.reference); w.blob(i.documentHash); w.bool(i.matched); w.bool(i.delivery);
   };
   func rInstruction(r : JC.Reader) : ?ST.Instruction {
     let ?family = rFamily(r) else return null; let ?deal = r.nat() else return null; let ?leg = r.nat() else return null; let ?cycle = r.nat() else return null; let ?role = rRole(r) else return null; let ?counterparty = r.principal() else return null;
     let ?assetLedger = r.principal() else return null; let ?assetAmount = r.nat() else return null; let ?cashLedger = r.principal() else return null; let ?cashAmount = r.nat() else return null;
-    let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; let ?documentHash = r.blob() else return null; let ?matched = r.bool() else return null;
-    ?{ family; deal; leg; cycle; role; counterparty; assetLedger; assetAmount; cashLedger; cashAmount; tradeId; reference; documentHash; matched }
+    let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; let ?documentHash = r.blob() else return null; let ?matched = r.bool() else return null; let ?delivery = r.bool() else return null;
+    ?{ family; deal; leg; cycle; role; counterparty; assetLedger; assetAmount; cashLedger; cashAmount; tradeId; reference; documentHash; matched; delivery }
   };
   // ─── financing ───
   func wCollateral(w : JC.Writer, c : FT.Collateral) { w.text(c.isin); w.nat(c.nominal) };
@@ -363,8 +369,12 @@ module {
       case (#callRaised(x)) { w.byte(0x0D); w.text(x.agreement); w.nat(x.id); w.nat(x.amount); w.bool(x.deliver); w.nat(x.day); w.nat(x.due) };
       case (#callMet(x)) { w.byte(0x0E); w.text(x.agreement); w.nat(x.call); w.nat(x.day) };
       case (#callSuperseded(x)) { w.byte(0x0F); w.text(x.agreement); w.nat(x.call); w.nat(x.outstanding); w.nat(x.day) };
+      case (#deliveryInstructed(x)) { w.byte(0x10); w.text(x.agreement); w.nat(x.id); wDeliveryMove(w, x.move); w.optNat(x.lot); w.text(x.isin); w.text(x.depot); w.nat(x.nominal); w.nat(x.instruction); w.nat(x.day) };
+      case (#deliverySettled(x)) { w.byte(0x11); w.text(x.agreement); w.nat(x.id); wDeliveryMove(w, x.move); w.nat(x.callCredit); w.nat(x.day) };
     }
   };
+  func wDeliveryMove(w : JC.Writer, m : CoT.DeliveryMove) { w.byte(switch (m) { case (#pledge) 1; case (#release) 2; case (#receive) 3; case (#return_) 4 }) };
+  func rDeliveryMove(r : JC.Reader) : ?CoT.DeliveryMove { switch (r.byte()) { case (?1) ?#pledge; case (?2) ?#release; case (?3) ?#receive; case (?4) ?#return_; case (_) null } };
   func rCollateralEvent(r : JC.Reader) : ?CoT.Event {
     switch (r.byte()) {
       case (?0x01) { let ?p = rCollateralPolicy(r) else return null; ?#policySet(p) };
@@ -382,6 +392,8 @@ module {
       case (?0x0D) { let ?agreement = r.text() else return null; let ?id = r.nat() else return null; let ?amount = r.nat() else return null; let ?deliver = r.bool() else return null; let ?day = r.nat() else return null; let ?due = r.nat() else return null; ?#callRaised({ agreement; id; amount; deliver; day; due }) };
       case (?0x0E) { let ?agreement = r.text() else return null; let ?call = r.nat() else return null; let ?day = r.nat() else return null; ?#callMet({ agreement; call; day }) };
       case (?0x0F) { let ?agreement = r.text() else return null; let ?call = r.nat() else return null; let ?outstanding = r.nat() else return null; let ?day = r.nat() else return null; ?#callSuperseded({ agreement; call; outstanding; day }) };
+      case (?0x10) { let ?agreement = r.text() else return null; let ?id = r.nat() else return null; let ?move = rDeliveryMove(r) else return null; let ?lot = r.optNat() else return null; let ?isin = r.text() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?instruction = r.nat() else return null; let ?day = r.nat() else return null; ?#deliveryInstructed({ agreement; id; move; lot; isin; depot; nominal; instruction; day }) };
+      case (?0x11) { let ?agreement = r.text() else return null; let ?id = r.nat() else return null; let ?move = rDeliveryMove(r) else return null; let ?callCredit = r.nat() else return null; let ?day = r.nat() else return null; ?#deliverySettled({ agreement; id; move; callCredit; day }) };
       case (_) null;
     }
   };
@@ -723,6 +735,8 @@ module {
       case (#statusReceived(x)) { w.byte(0x13); w.nat(x.instruction); w.text(x.status); w.nat(x.quantity); w.nat(x.amount); w.bool(x.matched); w.blob(x.documentHash); w.nat(x.day) };
       case (#split(x)) { w.byte(0x14); w.nat(x.deal); wNats(w, x.parts); w.nat(x.day) };
       case (#tradeAssigned(x)) { w.byte(0x15); w.nat(x.instruction); w.nat(x.tradeId); w.nat(x.day) };
+      case (#deliveryOpened(x)) { w.byte(0x16); w.nat(x.instruction); w.nat(x.deliveryId); w.bool(x.escrowed); w.text(x.note); w.nat(x.day) };
+      case (#deliveryAccepted(x)) { w.byte(0x17); w.nat(x.instruction); w.nat(x.deliveryId); w.bool(x.delivered); w.text(x.note); w.nat(x.day) };
     }
   };
   func rSettlementEvent(r : JC.Reader) : ?ST.Event {
@@ -748,6 +762,8 @@ module {
       case (?0x13) { let ?instruction = r.nat() else return null; let ?status = r.text() else return null; let ?quantity = r.nat() else return null; let ?amount = r.nat() else return null; let ?matched = r.bool() else return null; let ?documentHash = r.blob() else return null; let ?day = r.nat() else return null; ?#statusReceived({ instruction; status; quantity; amount; matched; documentHash; day }) };
       case (?0x14) { let ?deal = r.nat() else return null; let ?parts = rNats(r) else return null; let ?day = r.nat() else return null; ?#split({ deal; parts; day }) };
       case (?0x15) { let ?instruction = r.nat() else return null; let ?tradeId = r.nat() else return null; let ?day = r.nat() else return null; ?#tradeAssigned({ instruction; tradeId; day }) };
+      case (?0x16) { let ?instruction = r.nat() else return null; let ?deliveryId = r.nat() else return null; let ?escrowed = r.bool() else return null; let ?note = r.text() else return null; let ?day = r.nat() else return null; ?#deliveryOpened({ instruction; deliveryId; escrowed; note; day }) };
+      case (?0x17) { let ?instruction = r.nat() else return null; let ?deliveryId = r.nat() else return null; let ?delivered = r.bool() else return null; let ?note = r.text() else return null; let ?day = r.nat() else return null; ?#deliveryAccepted({ instruction; deliveryId; delivered; note; day }) };
       case (_) null;
     }
   };
@@ -815,6 +831,8 @@ module {
       case (#setBookDepot(x)) { w.byte(0x53); w.text(x.book); w.text(x.depot) };
       case (#assignDealDepot(x)) { w.byte(0x54); w.nat(x.deal); w.text(x.depot) };
       case (#transferDepot(x)) { w.byte(0x55); w.nat(x.lot); w.text(x.from); w.text(x.to); w.nat(x.nominal); w.text(x.reference) };
+      case (#setDepotAccount(x)) { w.byte(0x59); w.text(x.depot); TyCan.writeOptPrincipal(w, x.account) };
+      case (#instructDepotTransfer(x)) { w.byte(0x5A); w.nat(x.lot); w.text(x.from); w.text(x.to); w.nat(x.nominal); w.optNat(x.deliveryId); w.text(x.reference) };
       case (#announceCorporateAction(x)) { w.byte(0x56); wAnnouncement(w, x.announcement) };
       case (#cancelCorporateAction(x)) { w.byte(0x57); w.nat(x.action); w.text(x.reason) };
       case (#processCorporateAction(x)) { w.byte(0x58); w.nat(x.action); wDates(w, x.postingDate, x.valueDate, x.period, x.narration) };
@@ -873,6 +891,16 @@ module {
       case (#stageOrder(x)) { w.byte(0xD4); wOrderTerms(w, x.terms); TyCan.writeOptPrincipal(w, x.approver) };
       case (#cancelOrder(x)) { w.byte(0xD5); w.nat(x.order); w.text(x.reason) };
       case (#openMarketCycle(x)) { w.byte(0xD6); w.text(x.isin); TyCan.writeOptPrincipal(w, x.approver) };
+      case (#instructCollateralDelivery(x)) {
+        w.byte(0xD7); w.text(x.agreement);
+        switch (x.move) {
+          case (#pledge(m)) { w.byte(1); w.nat(m.lot); w.nat(m.nominal) };
+          case (#release(m)) { w.byte(2); w.nat(m.pledge); w.nat(m.deliveryId) };
+          case (#receive(m)) { w.byte(3); w.text(m.isin); w.text(m.depot); w.nat(m.nominal); w.nat(m.deliveryId) };
+          case (#return_(m)) { w.byte(4); w.nat(m.receipt) };
+        };
+        w.principal(x.counterparty); w.text(x.reference);
+      };
       case (#setTreasuryPolicy(p)) { w.byte(0x20); TyCan.writePolicy(w, p) };
       case (#registerSecurity(x)) { w.byte(0x21); TyCan.writeSecurityTerms(w, x.terms) };
       case (#publishCurve(x)) { w.byte(0x22); TyCan.writeCurve(w, x.curve) };
@@ -941,6 +969,8 @@ module {
       case 0x53 { let ?book = r.text() else return null; let ?depot = r.text() else return null; ?#setBookDepot({ book; depot }) };
       case 0x54 { let ?deal = r.nat() else return null; let ?depot = r.text() else return null; ?#assignDealDepot({ deal; depot }) };
       case 0x55 { let ?lot = r.nat() else return null; let ?from = r.text() else return null; let ?to = r.text() else return null; let ?nominal = r.nat() else return null; let ?reference = r.text() else return null; ?#transferDepot({ lot; from; to; nominal; reference }) };
+      case 0x59 { let ?depot = r.text() else return null; let ?account = TyCan.readOptPrincipal(r) else return null; ?#setDepotAccount({ depot; account }) };
+      case 0x5A { let ?lot = r.nat() else return null; let ?from = r.text() else return null; let ?to = r.text() else return null; let ?nominal = r.nat() else return null; let ?deliveryId = r.optNat() else return null; let ?reference = r.text() else return null; ?#instructDepotTransfer({ lot; from; to; nominal; deliveryId; reference }) };
       case 0x56 { let ?announcement = rAnnouncement(r) else return null; ?#announceCorporateAction({ announcement }) };
       case 0x57 { let ?action = r.nat() else return null; let ?reason = r.text() else return null; ?#cancelCorporateAction({ action; reason }) };
       case 0x58 { let ?action = r.nat() else return null; let ?(postingDate, valueDate, period, narration) = rDates(r) else return null; ?#processCorporateAction({ action; postingDate; valueDate; period; narration }) };
@@ -998,6 +1028,18 @@ module {
       case 0xD4 { let ?terms = rOrderTerms(r) else return null; let ?approver = TyCan.readOptPrincipal(r) else return null; ?#stageOrder({ terms; approver }) };
       case 0xD5 { let ?order = r.nat() else return null; let ?reason = r.text() else return null; ?#cancelOrder({ order; reason }) };
       case 0xD6 { let ?isin = r.text() else return null; let ?approver = TyCan.readOptPrincipal(r) else return null; ?#openMarketCycle({ isin; approver }) };
+      case 0xD7 {
+        let ?agreement = r.text() else return null;
+        let ?move : ?T.CollateralDeliveryMove = switch (r.byte()) {
+          case (?1) { let ?lot = r.nat() else return null; let ?nominal = r.nat() else return null; ?#pledge({ lot; nominal }) };
+          case (?2) { let ?pledge = r.nat() else return null; let ?deliveryId = r.nat() else return null; ?#release({ pledge; deliveryId }) };
+          case (?3) { let ?isin = r.text() else return null; let ?depot = r.text() else return null; let ?nominal = r.nat() else return null; let ?deliveryId = r.nat() else return null; ?#receive({ isin; depot; nominal; deliveryId }) };
+          case (?4) { let ?receipt = r.nat() else return null; ?#return_({ receipt }) };
+          case (_) null;
+        } else return null;
+        let ?counterparty = r.principal() else return null; let ?reference = r.text() else return null;
+        ?#instructCollateralDelivery({ agreement; move; counterparty; reference })
+      };
       case 0x79 { let ?family = rFamily(r) else return null; let ?id = r.nat() else return null; let ?leg = r.nat() else return null; let ?counterparty = r.principal() else return null; let ?tradeId = r.optNat() else return null; let ?reference = r.text() else return null; ?#instructFinancing({ family; id; leg; counterparty; tradeId; reference }) };
       case 0x20 { let ?p = TyCan.readPolicy(r) else return null; ?#setTreasuryPolicy(p) };
       case 0x21 { let ?terms = TyCan.readSecurityTerms(r) else return null; ?#registerSecurity({ terms }) };

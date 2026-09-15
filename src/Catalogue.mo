@@ -80,6 +80,8 @@ module {
       p("depot.book.update", "depot", #update, #command("setBookDepot"), false, true),
       p("depot.deal.assign", "depot", #update, #command("assignDealDepot"), false, true),
       p("depot.transfer", "depot", #update, #command("transferDepot"), true, true),
+      p("depot.account.update", "depot", #update, #command("setDepotAccount"), false, true),
+      p("depot.transfer.instruct", "depot", #create, #command("instructDepotTransfer"), true, true),
       p("corporate.action.announce", "corporate", #create, #command("announceCorporateAction"), false, true),
       p("corporate.action.cancel", "corporate", #reverse, #command("cancelCorporateAction"), false, true),
       p("corporate.action.process", "corporate", #update, #command("processCorporateAction"), true, true),
@@ -122,6 +124,7 @@ module {
       p("collateral.substitution.open", "collateral", #create, #command("openCollateralSubstitution"), true, true),
       p("collateral.substitution.settle", "collateral", #update, #command("settleCollateralSubstitution"), true, true),
       p("collateral.interest.settle", "collateral", #update, #command("settleCollateralInterest"), true, true),
+      p("collateral.delivery.instruct", "collateral", #create, #command("instructCollateralDelivery"), true, true),
       // ── limits: the tree and the counterparty data are governance; the sweep is opened under dual control ──
       p("limit.node.update", "limit", #update, #command("setLimitNode"), false, true),
       p("limit.node.remove", "limit", #delete, #command("removeLimitNode"), false, true),
@@ -243,6 +246,9 @@ module {
       case (#openCollateralSubstitution(_)) "openCollateralSubstitution";
       case (#settleCollateralSubstitution(_)) "settleCollateralSubstitution";
       case (#settleCollateralInterest(_)) "settleCollateralInterest";
+      case (#instructCollateralDelivery(_)) "instructCollateralDelivery";
+      case (#setDepotAccount(_)) "setDepotAccount";
+      case (#instructDepotTransfer(_)) "instructDepotTransfer";
       case (#setLimitNode(_)) "setLimitNode";
       case (#removeLimitNode(_)) "removeLimitNode";
       case (#amendCounterparty(_)) "amendCounterparty";
@@ -288,12 +294,12 @@ module {
       "setFunctionalCurrency", "setFxPair", "setFxRate", "recordRateFixing",
       "openEndOfDay", "setRetryPolicy", "resolveEndOfDayFailure", "clearAlert",
       "revaluePositions", "openCall", "resetCallRate", "adjustCallBalance", "serveCallNotice", "settleCall",
-      "setCustodyPolicy", "extendInstrument", "openDepot", "setBookDepot", "assignDealDepot", "transferDepot", "announceCorporateAction", "cancelCorporateAction", "processCorporateAction",
+      "setCustodyPolicy", "extendInstrument", "openDepot", "setBookDepot", "assignDealDepot", "transferDepot", "setDepotAccount", "instructDepotTransfer", "announceCorporateAction", "cancelCorporateAction", "processCorporateAction",
       "setSettlementVenue", "setSettlementLedger", "openSettlementCycle", "instructSettlement", "setInstructionTrade", "recycleSettlement", "recordSettlementStatus", "buyIn", "cancelSettlement", "splitDeal",
       "setFinancingPolicy", "openRepo", "settleRepoLeg", "resetRepoRate", "meetMarginCall", "substituteCollateral", "openLoan", "settleLoanLeg", "recallLoan", "instructFinancing",
       "setValuationPolicy", "quoteBondYield", "designateHedge", "assessHedge", "dedesignateHedge",
       "setCollateralPolicy", "setCollateralAgreement", "postCollateralCash", "pledgeCollateral", "releaseCollateral", "receiveCollateral", "returnCollateral",
-      "openCollateralSubstitution", "settleCollateralSubstitution", "settleCollateralInterest",
+      "openCollateralSubstitution", "settleCollateralSubstitution", "settleCollateralInterest", "instructCollateralDelivery",
       "setLimitNode", "removeLimitNode", "amendCounterparty", "openRiskSweep",
       "setReconciliationPolicy", "recordNostroNotification", "recordDepotStatement", "resolveDepotBreak", "resolveCashBreak",
       "setLiquidityFactors", "classifyInstrument", "classifyCounterparty", "declareCapital",

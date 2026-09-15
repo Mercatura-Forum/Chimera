@@ -63,8 +63,8 @@ module {
   };
   public func covers(r : AgreementRow, c : CoT.Coverage) : Bool { (r.covers & coverageBit(c)) != 0 };
   func classCode(c : CuT.Classification) : Nat8 { switch (c) { case (#sovereign) 1; case (#supranational) 2; case (#financial) 3; case (#corporate) 4 } };
-  func stateCode(s : CoT.SecuritiesState) : Nat8 { switch (s) { case (#pledged) 1; case (#instructed) 2; case (#live) 3; case (#returned) 4 } };
-  func stateOf(c : Nat8) : CoT.SecuritiesState { switch (c) { case 1 #pledged; case 2 #instructed; case 3 #live; case _ #returned } };
+  func stateCode(s : CoT.SecuritiesState) : Nat8 { switch (s) { case (#pledged) 1; case (#instructed) 2; case (#live) 3; case (#returned) 4; case (#delivering) 5; case (#returning) 6 } };
+  func stateOf(c : Nat8) : CoT.SecuritiesState { switch (c) { case 1 #pledged; case 2 #instructed; case 3 #live; case 5 #delivering; case 6 #returning; case _ #returned } };
   public func agreementSub(id : Text) : JT.SubledgerKey { Posting.subledgerOf("collateral/" # id) };
 
   func encodeAgreement(r : AgreementRow) : Blob {
@@ -409,6 +409,21 @@ module {
       case (#securitiesReceived(x)) { putSecurities(s, { id = x.id; agreement = x.agreement; lot = null; isin = x.isin; depot = x.depot; nominal = x.nominal; given = false; state = #live; cashReturned = 0; currency = ""; day = x.day }); credit(s, x.agreement, x.callCredit); touch(s, x.agreement, block) };
       case (#securitiesReturned(x)) { switch (securitiesRow(s, x.receipt)) { case (?r) putSecurities(s, { r with state = #returned }); case null {} }; credit(s, x.agreement, x.callCredit); touch(s, x.agreement, block) };
       case (#substitutionOpened(x)) { putSecurities(s, { id = x.id; agreement = x.agreement; lot = ?x.lot; isin = x.isin; depot = x.depot; nominal = x.nominal; given = true; state = #pledged; cashReturned = x.cashReturned; currency = x.currency; day = x.day }); touch(s, x.agreement, block) };
+      case (#deliveryInstructed(x)) {
+        switch (x.move) {
+          case (#pledge) putSecurities(s, { id = x.id; agreement = x.agreement; lot = x.lot; isin = x.isin; depot = x.depot; nominal = x.nominal; given = true; state = #delivering; cashReturned = 0; currency = ""; day = x.day });
+          case (#receive) putSecurities(s, { id = x.id; agreement = x.agreement; lot = null; isin = x.isin; depot = x.depot; nominal = x.nominal; given = false; state = #delivering; cashReturned = 0; currency = ""; day = x.day });
+          case (#release or #return_) { switch (securitiesRow(s, x.id)) { case (?r) putSecurities(s, { r with state = #returning }); case null {} } };
+        };
+        touch(s, x.agreement, block);
+      };
+      case (#deliverySettled(x)) {
+        switch (securitiesRow(s, x.id)) {
+          case (?r) putSecurities(s, { r with state = switch (x.move) { case (#pledge or #receive) #live; case (#release or #return_) #returned } });
+          case null {};
+        };
+        credit(s, x.agreement, x.callCredit); touch(s, x.agreement, block);
+      };
       case (#substitutionSettled(x)) {
         switch (securitiesRow(s, x.substitution)) {
           case (?r) {

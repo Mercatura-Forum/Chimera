@@ -64,8 +64,14 @@ module {
   public type CashMove = { #received; #given; #receivedReturned; #givenReturned };
   public func cashMoveText(m : CashMove) : Text { switch (m) { case (#received) "received"; case (#given) "given"; case (#receivedReturned) "receivedReturned"; case (#givenReturned) "givenReturned" } };
 
-  public type SecuritiesState = { #pledged; #instructed; #live; #returned };
-  public func securitiesStateText(s : SecuritiesState) : Text { switch (s) { case (#pledged) "pledged"; case (#instructed) "instructed"; case (#live) "live"; case (#returned) "returned" } };
+  /// `#delivering`: a movement into the pool instructed as a delivery through the venue and not yet delivered;
+  /// `#returning`: a live row instructed back through the venue.
+  public type SecuritiesState = { #pledged; #instructed; #live; #returned; #delivering; #returning };
+  public func securitiesStateText(s : SecuritiesState) : Text { switch (s) { case (#pledged) "pledged"; case (#instructed) "instructed"; case (#live) "live"; case (#returned) "returned"; case (#delivering) "delivering"; case (#returning) "returning" } };
+  /// The four movements of securities under an agreement that settle as deliveries free of payment through the
+  /// venue: the desk's lot pledged and released, the counterparty's securities received and returned.
+  public type DeliveryMove = { #pledge; #release; #receive; #return_ };
+  public func deliveryMoveText(m : DeliveryMove) : Text { switch (m) { case (#pledge) "pledge"; case (#release) "release"; case (#receive) "receive"; case (#return_) "return" } };
 
   public type Event = {
     #policySet : Policy;
@@ -83,6 +89,11 @@ module {
     /// settled through the venue as a delivery versus payment or by hand.
     #substitutionOpened : { agreement : AgreementId; id : Nat; lot : TT.DealId; isin : Text; depot : Text; nominal : Nat; cashReturned : Nat; currency : Text; day : Day };
     #substitutionSettled : { agreement : AgreementId; substitution : Nat; callCredit : Nat; interestCatchUp : Int; day : Day };
+    /// A movement instructed as a delivery through the venue: a pledge or a receipt opens its row here, a release
+    /// or a return names its live row; the pool credits it when the receipt lands.
+    #deliveryInstructed : { agreement : AgreementId; id : Nat; move : DeliveryMove; lot : ?TT.DealId; isin : Text; depot : Text; nominal : Nat; instruction : Nat; day : Day };
+    /// The delivery's receipt verified: the row live or returned, the call credited in the movement's direction.
+    #deliverySettled : { agreement : AgreementId; id : Nat; move : DeliveryMove; callCredit : Nat; day : Day };
     #interestAccrued : { agreement : AgreementId; currency : Text; interest : Int; day : Day };
     #interestSettled : { agreement : AgreementId; currency : Text; amount : Int; day : Day };
     /// The sweep's figures for the day: the exposure from the covered rows, the credit support balance of the

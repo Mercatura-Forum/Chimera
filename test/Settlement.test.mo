@@ -3,8 +3,10 @@
 /// of every state, a purchase's trade checked leg for leg against what Tachyon would return, the mirror of
 /// Tachyon's audit log fed from an enumeration and refusing a tampered leaf or a wrong root, the settlement
 /// receipt found in the mirror with the payouts read out of it, the fold through settlement, fail, recycle,
-/// reclaim and reset, the status advice and the confirmation rendered and the advice parsed back; the fold's
-/// fingerprint equal under a re-fold.
+/// reclaim and reset, the status advice and the confirmation rendered and the advice parsed back; a pledge and a
+/// receipt instructed as deliveries free of payment, the desk's own opened, reclaimed, reset and settled on the
+/// delivery's own leaf, the counterparty's checked leg for leg and accepted, the sese.023 rendered free of payment;
+/// the fold's fingerprint equal under a re-fold.
 // engine: wasi-only
 
 import Array "mo:core/Array";
@@ -181,25 +183,89 @@ Debug.print("count: instructions through their states = 2");
 Debug.print("count: refusals = " # Nat.toText(refused));
 
 // ─── the messages ───
-let advice = Msg.sese024Xml("REF-sell", ?11, Msg.statusOf(#failed, #maker, 1), "SAFE-001", bond.isin, sell.nominal, EGP, 3_960_000_00, 2, D0 + 3, false);
+let advice = Msg.sese024Xml("REF-sell", ?11, Msg.statusOf(#failed, #maker, 1), "SAFE-001", bond.isin, sell.nominal, EGP, 3_960_000_00, 2, D0 + 3, false, Msg.tradeTerms);
 check(Text.contains(advice, #text "<Flng>") and Text.contains(advice, #text "<Cd>AWMO</Cd>") and Text.contains(advice, #text "<MktInfrstrctrTxId>11</MktInfrstrctrTxId>"), "a failed sale advises failing, awaiting money");
 switch (Msg.parseSese024(Text.encodeUtf8(advice), 2)) {
   case (#ok(inc)) check(Text.equal(inc.reference, "REF-sell") and inc.tradeId == ?11 and Text.equal(inc.status, "SttlmSts/Flng") and inc.quantity == sell.nominal and inc.amount == 3_960_000_00 and Text.equal(inc.currency, EGP), "the advice parses back to its fields");
   case (#err(e)) check(false, "parse: " # e);
 };
-let pending = Msg.sese024Xml("REF-buy", ?7, Msg.statusOf(#funded, #taker, 0), "SAFE-001", bond.isin, buy.nominal, EGP, 9_850_000_00, 2, D0 + 2, true);
+let pending = Msg.sese024Xml("REF-buy", ?7, Msg.statusOf(#funded, #taker, 0), "SAFE-001", bond.isin, buy.nominal, EGP, 9_850_000_00, 2, D0 + 2, true, Msg.tradeTerms);
 check(Text.contains(pending, #text "<Pdg>") and Text.contains(pending, #text "<Cd>AWSH</Cd>") and Text.contains(pending, #text "<SctiesMvmntTp>RECE</SctiesMvmntTp>"), "a funded purchase advises pending, awaiting shares");
-let conf = Msg.sese025Xml("REF-buy", 7, "SAFE-001", bond.isin, buy.nominal, EGP, 9_850_000_00, 2, D0 + 2, D0 + 2, true);
+let conf = Msg.sese025Xml("REF-buy", 7, "SAFE-001", bond.isin, buy.nominal, EGP, 9_850_000_00, 2, D0 + 2, D0 + 2, true, Msg.tradeTerms);
 check(Text.contains(conf, #text "<FctvSttlmDt><Dt><Dt>") and Text.contains(conf, #text "<SttldQty><Qty><FaceAmt>10000000.00</FaceAmt>") and Text.contains(conf, #text "<CdtDbtInd>DBIT</CdtDbtInd>"), "the confirmation carries the settled quantity and the effective day");
 switch (Msg.parseSese024(Text.encodeUtf8("<Document><SctiesSttlmTxStsAdvc><TxId><AcctOwnrTxId>x</AcctOwnrTxId></TxId></SctiesSttlmTxStsAdvc></Document>"), 2)) { case (#err(_)) refused += 1; case (#ok(_)) check(false, "an advice without a status parsed") };
 Debug.print("count: messages rendered and parsed = 4");
+
+// ─── deliveries free of payment: a pledge the desk delivers, a receipt the counterparty delivers ───
+var refusedD = 0;
+func refusedDel<X>(r : { #ok : X; #err : ST.Error }, what : Text) { switch (r) { case (#ok(_)) check(false, what # " accepted"); case (#err(_)) refusedD += 1 } };
+refusedDel(Core.planInstructDelivery(c, #treasury, 40, 0, bond.isin, 1_000_000_00, 1, true, D0 + 4, cp, null, "collateral/CSA/1", D0 + 4), "a treasury deal as a delivery");
+refusedDel(Core.planInstructDelivery(c, #collateral, 500, 0, bond.isin, 1_000_000_00, 1, true, D0 + 4, cp, ?21, "collateral/CSA/500", D0 + 4), "a delivery by the desk naming a delivery id");
+refusedDel(Core.planInstructDelivery(c, #collateral, 501, 0, bond.isin, 1_000_000_00, 1, false, D0 + 4, cp, null, "collateral/CSA/501", D0 + 4), "a receipt without the counterparty's delivery id");
+refusedDel(Core.planInstructDelivery(c, #collateral, 500, 0, bond.isin, 0, 1, true, D0 + 4, cp, null, "collateral/CSA/500", D0 + 4), "a delivery of nothing");
+refusedDel(Core.planInstructDelivery(c, #collateral, 500, 0, bond.isin, 1_000_000_50, 100, true, D0 + 4, cp, null, "collateral/CSA/500", D0 + 4), "a nominal not whole in the ledger's units");
+refusedDel(Core.planInstructDelivery(c, #collateral, 500, 0, bond.isin, 1_000_000_00, 1, true, D0 + 9, cp, null, "collateral/CSA/500", D0 + 4), "a delivery into a cycle not opened");
+let del1 = applyS(okC(Core.planInstructDelivery(c, #collateral, 500, 0, bond.isin, 1_000_000_00, 100, true, D0 + 4, cp, null, "collateral/CSA/500", D0 + 4), "instruct the pledge"));
+refusedDel(Core.planInstructDelivery(c, #collateral, 500, 0, bond.isin, 1_000_000_00, 100, true, D0 + 4, cp, null, "collateral/CSA/500", D0 + 4), "the pledge instructed twice");
+let ?d1 = Core.instruction(c, del1) else Runtime.trap("FAIL: a row is missing");
+check(d1.delivery and d1.role == #maker and d1.cashAmount == 0 and d1.assetAmount == 1_000_000 and d1.assetLedger == secL and d1.cashLedger == secL and Core.nextStep(d1) == #openDelivery, "a pledge: one leg in the ledger's units, no cash, the desk opens the delivery");
+ignore applyS(#deliveryOpened({ instruction = del1; deliveryId = 21; escrowed = false; note = "approve the core"; day = D0 + 4 }));
+let ?d1o = Core.instruction(c, del1) else Runtime.trap("FAIL: a row is missing");
+check(d1o.state == #opened and d1o.tradeId == 21 and Core.nextStep(d1o) == #fundDelivery({ deliveryId = 21 }), "opened without its escrow, the desk funds the leg");
+ignore applyS(#fundingRecorded({ instruction = del1; tradeId = 21; escrowed = true; bothEscrowed = true; note = "legA escrowed"; day = D0 + 4 }));
+let ?d1f = Core.instruction(c, del1) else Runtime.trap("FAIL: a row is missing");
+check(d1f.state == #funded and d1f.escrowed and Core.nextStep(d1f) == #observeDelivery({ deliveryId = 21 }), "escrowed, the desk observes the delivery");
+// the counterparty never accepts: reclaimed past the deadline and reset, the desk opens another
+ignore applyS(#reclaimed({ instruction = del1; tradeId = 21; note = "legA refunded"; day = D0 + 5 }));
+ignore applyS(#tradeReset({ instruction = del1; previous = 21; day = D0 + 5 }));
+let ?d1r = Core.instruction(c, del1) else Runtime.trap("FAIL: a row is missing");
+check(d1r.state == #instructed and d1r.tradeId == 0 and not d1r.escrowed and Core.nextStep(d1r) == #openDelivery, "reclaimed and reset, the pledge opens a new delivery");
+ignore applyS(#deliveryOpened({ instruction = del1; deliveryId = 22; escrowed = true; note = "legA escrowed"; day = D0 + 5 }));
+let ?d1o2 = Core.instruction(c, del1) else Runtime.trap("FAIL: a row is missing");
+check(d1o2.state == #opened and d1o2.escrowed and Core.nextStep(d1o2) == #observeDelivery({ deliveryId = 22 }), "opened with its escrow, observed");
+let log3 = Array.concat<DT.AuditEvent>(log2, [ev(6, 22, "DELIVERY|id=22|maker=x|taker=y"), ev(7, 22, "FUND_A|id=22|block=30|amount=1000000"), ev(8, 22, "ESCROWED|id=22"), ev(9, 22, "ACCEPTED|id=22|taker=y"), ev(10, 22, "DELIVERED|id=22|legA_to_taker=1000000")]);
+switch (Core.checkEnumeration(c, log3, rootOf(log3))) {
+  case (#ok(sync)) { check(sync.from == 6 and sync.leaves.size() == 5, "five more leaves for the delivery"); ignore applyS(#auditSynced({ from = sync.from; leaves = sync.leaves; root = sync.root; day = D0 + 5 })) };
+  case (#err(e)) check(false, "third enumeration refused: " # e);
+};
+switch (Core.findReceipt(c, 21, log3)) { case (#err(_)) refusedD += 1; case (#ok(_)) check(false, "a receipt for the reclaimed delivery") };
+let dreceipt = okC(switch (Core.findReceipt(c, 22, log3)) { case (#ok(r)) #ok(r); case (#err(e)) #err(#ReceiptNotVerified({ instruction = del1; reason = e })) }, "delivery receipt");
+check(dreceipt.seq == 10 and dreceipt.assetPaid == 1_000_000 and dreceipt.cashPaid == 0 and ?dreceipt.root == Core.mirrorRoot(c), "the delivery receipt: the leg paid to the taker, nothing back, under the mirror's root");
+ignore applyS(#receiptVerified({ instruction = del1; tradeId = 22; seq = dreceipt.seq; leaf = dreceipt.leaf; root = dreceipt.root; assetPaid = dreceipt.assetPaid; cashPaid = 0; day = D0 + 5 }));
+ignore applyS(#settled({ instruction = del1; tradeId = 22; day = D0 + 5 }));
+let ?d1s = Core.instruction(c, del1) else Runtime.trap("FAIL: a row is missing");
+check(d1s.state == #settled and d1s.tradeId == 22, "the pledge settled on the second delivery");
+// the counterparty's delivery: the desk names it, checks it leg for leg, accepts it
+let del2 = applyS(okC(Core.planInstructDelivery(c, #collateral, 501, 0, bond.isin, 500_000_00, 100, false, D0 + 4, cp, ?23, "collateral/CSA/501", D0 + 4), "instruct the receipt"));
+let ?d2 = Core.instruction(c, del2) else Runtime.trap("FAIL: a row is missing");
+check(d2.delivery and d2.role == #taker and d2.tradeId == 23 and Core.nextStep(d2) == #acceptDelivery({ deliveryId = 23 }), "a receipt: the desk accepts the counterparty's delivery");
+func dv(maker : Principal, taker : Principal, ledger : Principal, amount : Nat, status : DT.DeliveryStatus, accepted : Bool) : DT.DeliveryView {
+  { id = 23; maker; taker; leg = { ledger; kind = #icrc1({ amount }) }; legState = { escrowed = status == #Escrowed or status == #Delivered; escrowBlock = ?1; escrowedAmount = amount; payout = null; payoutAmount = 0; refund = null; refundAmount = 0 }; deadline = 1; accepted; status; createdAt = 0 }
+};
+check(Core.checkDelivery(d2, desk, dv(cp, desk, secL, 500_000, #Escrowed, false)) == null, "the counterparty's delivery matches the instruction");
+check(Core.checkDelivery(d2, desk, dv(desk, cp, secL, 500_000, #Escrowed, false)) != null, "a delivery by another maker refused");
+check(Core.checkDelivery(d2, desk, dv(cp, cp, secL, 500_000, #Escrowed, false)) != null, "a delivery to another taker refused");
+check(Core.checkDelivery(d2, desk, dv(cp, desk, cashL, 500_000, #Escrowed, false)) != null, "a delivery on another ledger refused");
+check(Core.checkDelivery(d2, desk, dv(cp, desk, secL, 499_999, #Escrowed, false)) != null, "a delivery short of the instruction refused");
+check(Core.checkDelivery(d2, desk, dv(cp, desk, secL, 500_000, #Open, false)) != null, "a delivery not yet escrowed refused");
+check(Core.checkDelivery(d2, desk, dv(cp, desk, secL, 500_000, #Reclaimed, false)) != null, "a reclaimed delivery refused");
+ignore applyS(#deliveryAccepted({ instruction = del2; deliveryId = 23; delivered = true; note = "legA to taker"; day = D0 + 5 }));
+let ?d2a = Core.instruction(c, del2) else Runtime.trap("FAIL: a row is missing");
+check(d2a.state == #funded and Core.nextStep(d2a) == #observeDelivery({ deliveryId = 23 }), "accepted, the desk observes the delivery for its receipt");
+let free = Msg.sese023FreeXml("collateral/CSA/500", bond, 1_000_000_00, 2, "SAFE-001", D0 + 4, D0 + 4, false, Msg.collateralTerms(true));
+check(Text.contains(free, #text "<Pmt>FREE</Pmt>") and Text.contains(free, #text "<Cd>COLO</Cd>") and Text.contains(free, #text "<SctiesMvmntTp>DELI</SctiesMvmntTp>") and not Text.contains(free, #text "SttlmAmt"), "the pledge's sese.023: free of payment, collateral out, delivering, no amount");
+let freeIn = Msg.sese024Xml("collateral/CSA/501", ?23, Msg.statusOf(#funded, #taker, 0), "SAFE-001", bond.isin, 500_000_00, EGP, 0, 2, D0 + 4, true, Msg.collateralTerms(false));
+check(Text.contains(freeIn, #text "<Pmt>FREE</Pmt>") and Text.contains(freeIn, #text "<Cd>COLI</Cd>") and not Text.contains(freeIn, #text "SttlmAmt"), "the receipt's advice: free of payment, collateral in, no amount");
+Debug.print("count: deliveries through their states = 2");
+Debug.print("count: delivery checks = 7");
+Debug.print("count: delivery refusals = " # Nat.toText(refusedD));
 
 // ─── the fold under a re-fold ───
 let c2 = Core.newState(RI.newArena());
 for ((b, e) in List.values(folded)) Core.fold(c2, b, e);
 check(fp(c) == fp(c2), "the settlement fingerprint is reproduced by the re-fold");
 let st = Core.status(c);
-check(st.instructions == 2 and st.cycles == 3 and st.ledgers == 2 and st.mirroredLeaves == 6 and st.settled == 1 and st.failed == 1, "the status counts: " # debug_show st);
+check(st.instructions == 4 and st.cycles == 3 and st.ledgers == 2 and st.mirroredLeaves == 11 and st.settled == 2 and st.failed == 1, "the status counts: " # debug_show st);
 Debug.print("count: fingerprint checks = 1");
 
 if (failures > 0) { Debug.print("FAILURES: " # Nat.toText(failures)); assert false };

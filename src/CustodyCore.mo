@@ -17,6 +17,7 @@ import Int "mo:core/Int";
 import List "mo:core/List";
 import Nat "mo:core/Nat";
 import Nat8 "mo:core/Nat8";
+import Principal "mo:core/Principal";
 import Result "mo:core/Result";
 import Text "mo:core/Text";
 import Sha256 "mo:sha2/Sha256";
@@ -39,12 +40,15 @@ module {
   public let DEPOT_ROW_BYTES : Nat = 80;
   public let ACTION_ROW_BYTES : Nat = 62;
   public let ENTITLEMENT_ROW_BYTES : Nat = 27;
+  public let TRANSFER_ROW_BYTES : Nat = 33;
+  public let ACCOUNT_ROW_BYTES : Nat = 30;
   let MAX_PAGE = 512;
 
   public type InstrumentRow = { isin : Text; lei : Text; classification : CT.Classification; market : Text; settlementCycleDays : Nat; quotation : CT.Quotation; minDenomination : Nat; block : Nat };
   public type DepotRow = { id : Text; custodianHash : Nat; place : Text; safekeepingAccount : Text; block : Nat };
   public type ActionRow = { id : CT.ActionId; isin : Text; kind : Nat8; param : Nat; recordDate : Nat; exDate : Nat; paymentDate : Nat; state : CT.ActionState; lots : Nat; entitled : Nat; paid : Nat; lastBlock : Nat };
   public type EntitlementRow = { action : CT.ActionId; lot : TT.DealId; depotHash : Nat; nominal : Nat; amount : Nat; basis : CT.Basis; claimed : Bool; paid : Bool };
+  public type TransferRow = { instruction : Nat; lot : TT.DealId; fromHash : Nat; toHash : Nat; nominal : Nat; settled : Bool };
 
   func classCode(c : CT.Classification) : Nat8 { switch (c) { case (#sovereign) 1; case (#supranational) 2; case (#financial) 3; case (#corporate) 4 } };
   func classOf(b : Nat8) : CT.Classification { switch (b) { case 1 #sovereign; case 2 #supranational; case 3 #financial; case _ #corporate } };
@@ -84,6 +88,24 @@ module {
     { action; lot; depotHash = R.getNat(a, 0, 8); nominal = R.getNat(a, 8, 8); amount = R.getNat(a, 16, 8); basis = if (a[24] == 1) #actual else #contractual; claimed = R.getBool(a, 25); paid = R.getBool(a, 26) }
   };
 
+  func encodeTransfer(r : TransferRow) : Blob { let b = R.buf(); R.putNat(b, r.lot, 8); R.putNat(b, r.fromHash, 8); R.putNat(b, r.toHash, 8); R.putNat(b, r.nominal, 8); R.putBool(b, r.settled); R.done(b, TRANSFER_ROW_BYTES) };
+  func decodeTransfer(instruction : Nat, v : Blob) : TransferRow { let a = Blob.toArray(v); { instruction; lot = R.getNat(a, 0, 8); fromHash = R.getNat(a, 8, 8); toHash = R.getNat(a, 16, 8); nominal = R.getNat(a, 24, 8); settled = R.getBool(a, 32) } };
+  /// A principal in a fixed row: its length then its bytes, so the desk's own account (none set) is a cleared row.
+  func encodeAccount(p : ?Principal) : Blob {
+    let b = R.buf();
+    let bytes = switch (p) { case (?x) Blob.toArray(Principal.toBlob(x)); case null [] };
+    R.putNat(b, bytes.size(), 1);
+    var i = 0;
+    while (i < ACCOUNT_ROW_BYTES - 1) { R.putByte(b, if (i < bytes.size()) bytes[i] else 0); i += 1 };
+    R.done(b, ACCOUNT_ROW_BYTES)
+  };
+  func decodeAccount(v : Blob) : ?Principal {
+    let a = Blob.toArray(v);
+    let n = R.getNat(a, 0, 1);
+    if (n == 0) return null;
+    ?Principal.fromBlob(Blob.fromArray(Array.tabulate<Nat8>(n, func(i) { a[1 + i] })))
+  };
+
   public type State = {
     instruments : RI.State;    // isin(12) -> row
     depots : RI.State;         // id(32) -> row
@@ -98,6 +120,8 @@ module {
     entitlements : RI.State;   // action(8) ‖ lot(8) -> row
     encumbered : RI.State;     // lot(8) ‖ depotHash(8) -> nominal pledged or lent
     received : RI.State;       // isin(12) ‖ depotHash(8) -> collateral nominal held for a counterparty
+    accounts : RI.State;       // depot(32) -> the principal holding it on the ledgers, or cleared for the desk's own
+    transfers : RI.State;      // instruction(8) -> a transfer through the venue
     var policy : ?CT.Policy;
     var instrumentCount : Nat;
     var depotCount : Nat;
@@ -122,6 +146,8 @@ module {
       entitlements = RI.newStateIn(arena, { keyBytes = 16; valBytes = ENTITLEMENT_ROW_BYTES });
       encumbered = RI.newStateIn(arena, { keyBytes = 16; valBytes = 8 });
       received = RI.newStateIn(arena, { keyBytes = 20; valBytes = 8 });
+      accounts = RI.newStateIn(arena, { keyBytes = 32; valBytes = ACCOUNT_ROW_BYTES });
+      transfers = RI.newStateIn(arena, { keyBytes = 8; valBytes = TRANSFER_ROW_BYTES });
       var policy = null; var instrumentCount = 0; var depotCount = 0; var holdingCount = 0; var actionCount = 0; var entitlementCount = 0; var transferCount = 0;
     }
   };
@@ -131,6 +157,11 @@ module {
   public func policy(s : State) : ?CT.Policy { s.policy };
   public func instrument(s : State, isin : Text) : ?InstrumentRow { switch (RI.get(s.instruments, R.textKey(isin, 12))) { case (?v) ?decodeInstrument(isin, v); case null null } };
   public func depot(s : State, id : Text) : ?DepotRow { switch (RI.get(s.depots, R.textKey(id, 32))) { case (?v) ?decodeDepot(id, v); case null null } };
+  /// The principal holding a depot on the ledgers, or none for a depot the desk's own account holds.
+  public func depotAccount(s : State, id : Text) : ?Principal { switch (RI.get(s.accounts, R.textKey(id, 32))) { case (?v) decodeAccount(v); case null null } };
+  public func heldByDesk(s : State, id : Text) : Bool { depotAccount(s, id) == null };
+  public func transfer(s : State, instruction : Nat) : ?TransferRow { switch (RI.get(s.transfers, R.key(instruction, 8))) { case (?v) ?decodeTransfer(instruction, v); case null null } };
+  public func transferView(s : State, r : TransferRow) : CT.TransferView { { instruction = r.instruction; lot = r.lot; from = depotIdOfHash(s, r.fromHash); to = depotIdOfHash(s, r.toHash); nominal = r.nominal; settled = r.settled } };
   public func depotIdOfHash(s : State, h : Nat) : Text { switch (RI.get(s.depotByHash, R.key(h, 8))) { case (?v) R.getText(Blob.toArray(v), 0, 32); case null "" } };
   public func bookDepotOf(s : State, book : Text) : ?Text { switch (RI.get(s.bookDepot, R.textKey(book, 32))) { case (?v) ?R.getText(Blob.toArray(v), 0, 32); case null null } };
   public func dealDepotOf(s : State, deal : TT.DealId) : ?Text { switch (RI.get(s.dealDepot, R.key(deal, 8))) { case (?v) ?R.getText(Blob.toArray(v), 0, 32); case null null } };
@@ -272,6 +303,30 @@ module {
     if (held < nominal) return #err(#DepotShort({ depot = from; isin = ""; held; wanted = nominal }));
     #ok(#transferred({ lot; from; to; nominal; reference; day }))
   };
+  public func planSetDepotAccount(s : State, depotId : Text, account : ?Principal, day : Nat) : Res<CT.Event> {
+    if (depot(s, depotId) == null) return #err(#UnknownDepot({ depot = depotId }));
+    switch (account) { case (?p) { if (Principal.isAnonymous(p)) return bad("the account is a principal") }; case null {} };
+    if (depotAccount(s, depotId) == account) return bad("the depot's account is already so");
+    #ok(#depotAccountSet({ depot = depotId; account; day }))
+  };
+  /// A transfer through the venue: between a depot the desk holds and one another party holds, in either
+  /// direction; the nominal available in the depot it leaves. What comes back is the side of the delivery: the
+  /// desk delivers to the receiving depot's holder, or the sending depot's holder delivers to the desk.
+  public func planInstructTransfer(s : State, lot : TT.DealId, from : Text, to : Text, nominal : Nat, reference : Text) : Res<{ deskDelivers : Bool; counterparty : Principal }> {
+    if (depot(s, from) == null) return #err(#UnknownDepot({ depot = from }));
+    if (depot(s, to) == null) return #err(#UnknownDepot({ depot = to }));
+    if (Text.equal(from, to)) return bad("a transfer moves between two depots");
+    if (nominal == 0) return bad("a transfer moves a positive nominal");
+    if (bytesOf(reference) == 0 or bytesOf(reference) > 35) return bad("the reference is 1..35 bytes");
+    let held = available(s, lot, from);
+    if (held < nominal) return #err(#DepotShort({ depot = from; isin = ""; held; wanted = nominal }));
+    switch (depotAccount(s, from), depotAccount(s, to)) {
+      case (null, ?p) #ok({ deskDelivers = true; counterparty = p });
+      case (?p, null) #ok({ deskDelivers = false; counterparty = p });
+      case (null, null) bad("both depots are held by the desk's own account: the transfer is a book movement");
+      case (?_, ?_) bad("neither depot is held by the desk's own account: the venue delivers to or from the desk");
+    }
+  };
   public func planAnnounce(s : State, treasury : TreasuryCore.State, a : CT.Announcement, day : Nat) : Res<CT.Event> {
     if (s.policy == null) return #err(#NoPolicy);
     if (TreasuryCore.security(treasury, a.isin) == null) return #err(#UnknownInstrument({ isin = a.isin }));
@@ -298,6 +353,8 @@ module {
   /// (a book without one) is not checked, because nothing tracks it.
   public func checkSaleDepot(s : State, treasury : TreasuryCore.State, sale : TreasuryCore.DealRow, t : TT.SecurityTrade, method : TT.LotMethod) : ?CT.Error {
     let ?depotId = dealDepotOf(s, sale.id) else return null;
+    // the venue escrows from the desk's own account: a depot another party holds delivers by that party's act
+    if (not heldByDesk(s, depotId)) return ?#InvalidTerms({ reason = "depot " # depotId # " is held by another account; the desk delivers from its own" });
     for ((lot, q) in TreasuryCore.allocateSale(TreasuryCore.lotsOf(treasury, sale.book, t.isin), t.nominal, method).vals()) {
       let held = available(s, lot.id, depotId);
       if (held < q) return ?#DepotShort({ depot = depotId; isin = t.isin; held; wanted = q });
@@ -515,6 +572,26 @@ module {
         if (x.nominal > 0) reduceLotHolding(s, x.lot, isinOf(x.lot), x.nominal);
       };
       case (#paid(x)) { switch (action(s, x.action)) { case (?r) { let n = { r with state = #paid; lastBlock = block }; putAction(s, n); indexAction(s, n) }; case null {} } };
+      case (#depotAccountSet(x)) ignore RI.put(s.accounts, R.textKey(x.depot, 32), encodeAccount(x.account));
+      case (#transferInstructed(x)) {
+        ignore RI.put(s.transfers, R.key(x.instruction, 8), encodeTransfer({ instruction = x.instruction; lot = x.lot; fromHash = hash8(x.from); toHash = hash8(x.to); nominal = x.nominal; settled = false }));
+        encumber(s, x.lot, x.from, x.nominal, true);
+      };
+      case (#transferSettled(x)) {
+        switch (transfer(s, x.instruction)) {
+          case (?r) {
+            if (not r.settled) {
+              let from = depotIdOfHash(s, r.fromHash); let to = depotIdOfHash(s, r.toHash); let isin = isinOf(r.lot);
+              encumber(s, r.lot, from, r.nominal, false);
+              reduceHolding(s, r.lot, from, isin, r.nominal);
+              setHolding(s, r.lot, to, isin, holding(s, r.lot, to) + r.nominal);
+              ignore RI.put(s.transfers, R.key(x.instruction, 8), encodeTransfer({ r with settled = true }));
+              s.transferCount += 1;
+            };
+          };
+          case null {};
+        };
+      };
       case (#pledged(x)) encumber(s, x.lot, x.depot, x.nominal, true);
       case (#lent(x)) encumber(s, x.lot, x.depot, x.nominal, true);
       case (#released(x)) encumber(s, x.lot, x.depot, x.nominal, false);
@@ -578,7 +655,7 @@ module {
   public func fingerprintInto(w : C.Writer, s : State) {
     switch (s.policy) { case null w.byte(0); case (?p) { w.byte(1); w.text(CT.basisText(p.entitlementBasis)) } };
     w.nat(s.instrumentCount); w.nat(s.depotCount); w.nat(s.holdingCount); w.nat(s.actionCount); w.nat(s.entitlementCount); w.nat(s.transferCount);
-    for ((idx, width) in [(s.instruments, 12), (s.depots, 32), (s.depotByHash, 8), (s.bookDepot, 32), (s.dealDepot, 8), (s.holdings, 16), (s.byDepotIsin, 28), (s.actions, 8), (s.actionsByIsin, 20), (s.actionsByState, 9), (s.entitlements, 16), (s.encumbered, 16), (s.received, 20)].vals()) {
+    for ((idx, width) in [(s.instruments, 12), (s.depots, 32), (s.depotByHash, 8), (s.bookDepot, 32), (s.dealDepot, 8), (s.holdings, 16), (s.byDepotIsin, 28), (s.actions, 8), (s.actionsByIsin, 20), (s.actionsByState, 9), (s.entitlements, 16), (s.encumbered, 16), (s.received, 20), (s.accounts, 32), (s.transfers, 8)].vals()) {
       let (lo, hi) = R.fullRange(width);
       var n = 0;
       walk(idx, lo, hi, func(k, v) { w.blob(k); w.blob(v); n += 1 });

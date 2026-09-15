@@ -379,7 +379,7 @@ def block_hash(preimage):
 
 def decode_block(raw):
     """Decode raw block bytes; verify the embedded hash; return (fields, hash).
-    Any malformed input - truncated, bad tag, bad UTF-8, non-minimal number  - 
+    Any malformed input - truncated, bad tag, bad UTF-8, non-minimal number - 
     is a verification failure (AssertionError), never a crash."""
     try:
         return _decode_block(raw)

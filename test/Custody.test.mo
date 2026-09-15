@@ -1,5 +1,7 @@
 /// Custody.test.mo: securities services on the pure layer: the instrument extended, two depots opened, two lots
 /// bought and settled into their depots, a transfer free of payment, a sale checked against the delivering depot,
+/// a depot held by a custodian's account and a transfer to it and back instructed to the venue (the nominal
+/// encumbered where it leaves, moved by the settlement), a sale from that depot refused,
 /// an announced coupon entitled on the contractual basis at the record date, claimed on the instrument's own coupon
 /// date with the lot's accrual cleared into it and the accrual restarting without a reversal, then paid at the
 /// payment date; a partial redemption on the actual basis across the depots a lot sits in, an early redemption
@@ -148,6 +150,44 @@ switch (Core.checkSaleDepot(c, t, sellRow, sale8, #fifo)) { case (?#DepotShort(e
 check(Core.checkSaleDepot(c, t, sellRow, { sale8 with nominal = 6_000_000_00 }, #fifo) == null, "a sale of 6M from a depot holding 7M delivers");
 Debug.print("count: transfers = 1");
 Debug.print("count: sale depot checks = 2");
+
+// ─── a depot held by another party's account, and a transfer to it through the venue ───
+let custodian = Principal.fromText("2ibo7-dia");
+refusedC(Core.planSetDepotAccount(c, "DEPOT-NONE", ?custodian, D0 + 6), "an account on an unknown depot");
+refusedC(Core.planSetDepotAccount(c, d2.id, ?Principal.fromText("2vxsx-fae"), D0 + 6), "the anonymous principal as a holder");
+refusedC(Core.planSetDepotAccount(c, d2.id, null, D0 + 6), "clearing an account never set");
+refusedC(Core.planInstructTransfer(c, lotA, d1.id, d2.id, 1_000_000_00, "fop-2"), "a transfer through the venue between two depots of the desk's own");
+ignore applyC(okC(Core.planSetDepotAccount(c, d2.id, ?custodian, D0 + 6), "the custodian holds depot 2"));
+check(Core.depotAccount(c, d2.id) == ?custodian and Core.heldByDesk(c, d1.id) and not Core.heldByDesk(c, d2.id), "depot 2 is held by the custodian's account, depot 1 by the desk's");
+refusedC(Core.planSetDepotAccount(c, d2.id, ?custodian, D0 + 6), "the same account set twice");
+check(Core.checkSaleDepot(c, t, sellRow, { sale8 with nominal = 1_000_000_00 }, #fifo) == null, "a sale delivering from depot 1 stays the desk's");
+ignore applyC(#dealDepotAssigned({ deal = 999; depot = d2.id; day = D0 + 6 }));
+switch (Core.checkSaleDepot(c, t, sellRow, { sale8 with nominal = 1_000_000_00 }, #fifo)) { case (?#InvalidTerms(_)) refused += 1; case (_) check(false, "a sale from a depot another party holds is refused: the desk cannot escrow it") };
+refusedC(Core.planInstructTransfer(c, lotA, d1.id, d2.id, 7_000_000_01, "fop-2"), "a transfer beyond the depot's available");
+refusedC(Core.planInstructTransfer(c, lotA, d1.id, d2.id, 0, "fop-2"), "a transfer of nothing");
+refusedC(Core.planInstructTransfer(c, lotA, d1.id, d2.id, 1_000_000_00, ""), "a transfer without a reference");
+let out = okC(Core.planInstructTransfer(c, lotA, d1.id, d2.id, 2_000_000_00, "fop-2"), "a transfer to the custodian's depot");
+check(out.deskDelivers and out.counterparty == custodian, "the desk delivers to the custodian");
+let back = okC(Core.planInstructTransfer(c, lotA, d2.id, d1.id, 1_000_000_00, "fop-3"), "a transfer back from the custodian's depot");
+check(not back.deskDelivers and back.counterparty == custodian, "the custodian delivers to the desk");
+ignore applyC(#transferInstructed({ lot = lotA; from = d1.id; to = d2.id; nominal = 2_000_000_00; reference = "fop-2"; instruction = 777; day = D0 + 6 }));
+check(Core.available(c, lotA, d1.id) == 5_000_000_00 and Core.holding(c, lotA, d1.id) == 7_000_000_00 and Core.holding(c, lotA, d2.id) == 3_000_000_00, "instructed, the nominal is encumbered where it leaves and has not moved");
+switch (Core.transfer(c, 777)) { case (?tr) check(tr.lot == lotA and tr.nominal == 2_000_000_00 and not tr.settled and Core.transferView(c, tr).from == d1.id, "the transfer stands under its instruction"); case null check(false, "the transfer row") };
+refusedC(Core.planInstructTransfer(c, lotA, d1.id, d2.id, 5_000_000_01, "fop-4"), "a second transfer beyond what the first leaves available");
+ignore applyC(#transferSettled({ instruction = 777; day = D0 + 7 }));
+check(Core.holding(c, lotA, d1.id) == 5_000_000_00 and Core.holding(c, lotA, d2.id) == 5_000_000_00 and Core.available(c, lotA, d1.id) == 5_000_000_00, "settled, the nominal moved and the encumbrance lifted");
+ignore applyC(#transferSettled({ instruction = 777; day = D0 + 7 }));
+check(Core.holding(c, lotA, d1.id) == 5_000_000_00 and Core.holding(c, lotA, d2.id) == 5_000_000_00, "a settlement folded twice moves nothing twice");
+switch (Core.transfer(c, 777)) { case (?tr) check(tr.settled, "the transfer is settled"); case null check(false, "the transfer row") };
+check(Core.heldOfLot(c, lotA) == buyA.nominal, "the lot's holdings across depots still equal its nominal");
+// the custodian delivers the nominal back: the desk the taker, the holdings as before
+ignore applyC(#transferInstructed({ lot = lotA; from = d2.id; to = d1.id; nominal = 2_000_000_00; reference = "fop-3"; instruction = 778; day = D0 + 7 }));
+check(Core.available(c, lotA, d2.id) == 3_000_000_00, "the nominal coming back is encumbered in the custodian's depot");
+ignore applyC(#transferSettled({ instruction = 778; day = D0 + 7 }));
+check(Core.holding(c, lotA, d1.id) == 7_000_000_00 and Core.holding(c, lotA, d2.id) == 3_000_000_00 and Core.available(c, lotA, d2.id) == 3_000_000_00, "back, the holdings are as before the two transfers");
+ignore applyC(#dealDepotAssigned({ deal = 999; depot = d1.id; day = D0 + 7 }));
+Debug.print("count: transfers through the venue = 2");
+Debug.print("count: depot account checks = 3");
 
 // ─── the announced coupon: entitled at the record date, claimed on the grid date, paid at the payment date ───
 let periods = Treasury.couponPeriodsOf(sec, 100_00);
@@ -298,7 +338,7 @@ Debug.print("count: refusals = " # Nat.toText(refused));
 
 // ─── the fold's fingerprint under a re-fold of the same events ───
 let st = Core.status(c);
-check(st.instruments == 1 and st.depots == 2 and st.actions == 5 and st.transfers == 1, "the status counts");
+check(st.instruments == 1 and st.depots == 2 and st.actions == 5 and st.transfers == 3, "the status counts");
 Debug.print("count: holdings rows = " # Nat.toText(st.holdings));
 Debug.print("count: entitlement rows = " # Nat.toText(st.entitlements));
 let arena2 = RI.newArena();

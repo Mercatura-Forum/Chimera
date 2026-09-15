@@ -6,7 +6,7 @@
 ///   2. deals: each kind captured and its row's facts; the refusals - a cross pair, a rate that is not spot plus
 ///      points, an interest deal in a Sharia book, a sale beyond the position, a swap with legs the same way;
 ///   3. limits over the fold: a counterparty exposure breached without an approver refused, with one recorded;
-///   4. money: the legs of every settlement balance per currency and land on the accounts the policy names  - 
+///   4. money: the legs of every settlement balance per currency and land on the accounts the policy names -
 ///      a placement's start and maturity with the accrual caught up, a forward at spot with the realised difference,
 ///      a bond bought dirty, accrued and amortised daily, its coupon paid, its sale consuming the lot pro rata to what
 ///      is booked, an option's premium and expiry, a swap period settled against a fixing;
