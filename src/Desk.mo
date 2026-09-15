@@ -428,40 +428,9 @@ shared (initMsg) persistent actor class Desk(init : {
   public query func deskProof(index : Nat) : async ?DL.Proof { DL.proof(deskLog, index) };
   public query func verifyDeskChain() : async { checked : Nat; fault : ?Text } { DL.verifyChain(deskLog, codec) };
   public query func tipCertificate() : async ?DomainCert.Certificate { DomainCert.certificate(cert, CertifiedData.getCertificate) };
-  /// Every block of a log, paged to exhaustion: a range read is bounded, and a fold that stopped at the bound would
-  /// compare a prefix and call it the state.
-  func allDeskBlocks() : [Core.Block] {
-    let out = List.empty<Core.Block>();
-    var start = 0;
-    label walk loop {
-      let pg = DL.page(deskLog, codec, start, DL.MAX_RANGE);
-      for (b in pg.blocks.vals()) List.add(out, b);
-      switch (pg.next) { case (?n) start := n; case null break walk };
-    };
-    List.toArray(out)
-  };
-  func allJournalBlocks() : [JT.Block] {
-    let out = List.empty<JT.Block>();
-    var start = 0;
-    let n = JLog.length(journalLog);
-    while (start < n) {
-      let page = JLog.getRange(journalLog, start, 1000);
-      if (page.size() == 0) Runtime.trap("Desk: the journal log returned an empty page inside its length");
-      for (b in page.vals()) List.add(out, b);
-      start += page.size();
-    };
-    List.toArray(out)
-  };
-  /// The live fingerprints and the fingerprints of a fresh fold of each log, so "the state is the fold of the log"
-  /// is a comparison a battery makes rather than a claim.
-  public query func fingerprints() : async { deskLive : Blob; deskReplayed : Blob; journalLive : Blob; journalReplayed : Blob; deskHeight : Nat; journalHeight : Nat } {
-    let journalRange = allJournalBlocks();
-    let freshDesk = Core.replay(installer, allDeskBlocks(), journalRange);
-    let freshJournal = JCore.replay(me(), journalRange);
-    { deskLive = Core.fingerprint(desk); deskReplayed = Core.fingerprint(freshDesk); journalLive = JCore.fingerprint(journal); journalReplayed = JCore.fingerprint(freshJournal); deskHeight = desk.height; journalHeight = JCore.height(journal) }
-  };
-
-  /// The live fingerprints alone, for a comparison across an upgrade or around a refusal.
+  /// The live fingerprints. A fold of the log into a fresh state is an update through the replay arena
+  /// (`beginReplay`, `advanceReplay`), never a query: the fresh state's indexes live in stable regions, and the
+  /// substrate refuses a stable write in query mode.
   public query func liveFingerprints() : async { desk : Blob; journal : Blob; deskHeight : Nat; journalHeight : Nat } {
     { desk = Core.fingerprint(desk); journal = JCore.fingerprint(journal); deskHeight = desk.height; journalHeight = JCore.height(journal) }
   };
@@ -514,15 +483,6 @@ shared (initMsg) persistent actor class Desk(init : {
     let ?r = replay else return null;
     ?{ complete = r.complete; current = r.complete and r.deskTarget == desk.height and r.journalTarget == JLog.length(journalLog); live = Core.digestScalars(desk); replayed = Core.digestScalars(r.state) }
   };
-  /// The fingerprint by section, live and replayed in one message, naming the sub-state that diverges when one
-  /// does; a log longer than one message folds is compared through the replay in steps instead.
-  public query func fingerprintSections() : async [(Text, Blob, Blob)] {
-    let fresh = Core.replay(installer, allDeskBlocks(), allJournalBlocks());
-    let live = Core.fingerprintSections(desk);
-    let replayed = Core.fingerprintSections(fresh);
-    Array.tabulate<(Text, Blob, Blob)>(live.size(), func(i) { (live[i].0, live[i].1, replayed[i].1) })
-  };
-
   // ═══════════════════════════════════════════════════════
   //  THE JOURNAL'S READS
   // ═══════════════════════════════════════════════════════
@@ -547,6 +507,9 @@ shared (initMsg) persistent actor class Desk(init : {
   public query func periodPostingIndices(period : JT.PeriodId) : async [Nat] { JCore.periodPostingIndices(journal, period) };
   public query func businessDate() : async ?JT.Day { JCore.businessDate(journal) };
   public query func accountingToday() : async JT.Day { JCore.effectiveToday(journal, now()) };
+  /// The substrate's clock as the desk reads it (the time of the last execution), beside the business date the
+  /// journal's calendar authority holds: what a deadline is measured against, and what it is not.
+  public query func journalClock() : async { now : Nat64; businessDate : JT.Day } { { now = now(); businessDate = JCore.effectiveToday(journal, now()) } };
   public query func calendar() : async ?JT.CalendarConfig { JCore.calendar(journal) };
   public query func journalStatus() : async { height : Nat; posted : Nat; pending : Nat; voided : Nat; active : Bool; accounts : Nat; periods : Nat; currencies : Nat; fingerprint : Blob } {
     { height = JCore.height(journal); posted = JCore.postedCount(journal); pending = JCore.pendingCount(journal); voided = JCore.voidedCount(journal); active = JCore.isActive(journal);
